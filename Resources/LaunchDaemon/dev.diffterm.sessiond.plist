@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.diffterm.sessiond</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/var/jb/Applications/diffTerm.app/sessiond</string>
+		<string>/var/jb/var/mobile/Library/Application Support/diffTerm/sessiond.sock</string>
+	</array>
+	<!-- Runs as the user, so the shells it owns are the user's, not root. -->
+	<key>UserName</key>
+	<string>mobile</string>
+	<!-- launchd keeps it alive and restarts it if it ever exits, so a session
+	     is only ever lost when the user closes it, never by the app dying. -->
+	<key>KeepAlive</key>
+	<true/>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Adaptive</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/var/jb/var/mobile</string>
+	</dict>
+</dict>
+</plist>
