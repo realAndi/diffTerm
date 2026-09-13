@@ -252,12 +252,20 @@ run: install
 package: $(BINARY)
 	@echo "  DEB   $(BUILD)/$(APP_NAME)_$(VERSION).deb"
 	@rm -rf $(BUILD)/deb
-	@mkdir -p $(BUILD)/deb/DEBIAN $(BUILD)/deb/var/jb/Applications
+	@mkdir -p $(BUILD)/deb/DEBIAN $(BUILD)/deb/var/jb/Applications \\
+		$(BUILD)/deb/var/jb/Library/LaunchDaemons
 	@cp -R $(APP) $(BUILD)/deb/var/jb/Applications/
+	# The daemon plist must ship in the package: without it sessiond is never
+	# loaded, every session silently falls back to a local pty, and shells die
+	# with the app — the one thing this terminal promises not to do.
+	@cp $(DAEMON_PLIST) $(BUILD)/deb/var/jb/Library/LaunchDaemons/
 	@printf 'Package: %s\nName: %s\nVersion: %s\nArchitecture: iphoneos-arm64\nDescription: A modern terminal emulator for jailbroken iOS.\nMaintainer: diffTerm\nAuthor: diffTerm\nSection: Terminal_Support\nDepends: firmware (>= $(DEPLOY_MIN))\nTag: role::hacker\n' \
 		"$(BUNDLE_ID)" "$(APP_NAME)" "$(VERSION)" > $(BUILD)/deb/DEBIAN/control
-	@printf '#!/bin/sh\nuicache -p /var/jb/Applications/$(APP_NAME).app\nexit 0\n' > $(BUILD)/deb/DEBIAN/postinst
-	@printf '#!/bin/sh\nuicache -u /var/jb/Applications/$(APP_NAME).app\nexit 0\n' > $(BUILD)/deb/DEBIAN/prerm
+	# postinst loads the daemon (idempotently: bootout first so upgrades
+	# re-bootstrap rather than error), prerm stops it so KeepAlive does not
+	# respawn it against a bundle that is being removed.
+	@printf '#!/bin/sh\nPLIST=/var/jb/Library/LaunchDaemons/dev.diffterm.sessiond.plist\nlaunchctl bootout system "$$PLIST" 2>/dev/null\nlaunchctl bootstrap system "$$PLIST" 2>/dev/null || launchctl load -w "$$PLIST" 2>/dev/null\nuicache -p /var/jb/Applications/$(APP_NAME).app\nexit 0\n' > $(BUILD)/deb/DEBIAN/postinst
+	@printf '#!/bin/sh\nPLIST=/var/jb/Library/LaunchDaemons/dev.diffterm.sessiond.plist\nlaunchctl bootout system "$$PLIST" 2>/dev/null || launchctl unload -w "$$PLIST" 2>/dev/null\nuicache -u /var/jb/Applications/$(APP_NAME).app\nexit 0\n' > $(BUILD)/deb/DEBIAN/prerm
 	@chmod 755 $(BUILD)/deb/DEBIAN/postinst $(BUILD)/deb/DEBIAN/prerm
 	@dpkg-deb -Zgzip -b $(BUILD)/deb $(BUILD)/$(APP_NAME)_$(VERSION).deb
 
