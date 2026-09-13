@@ -34,12 +34,18 @@ https://reallyitsandi.com/repo/
 
 diffTerm builds on the device it runs on. You need the Procursus toolchain with `clang`, `swiftc`, `ldid`, `make` and `python3`, and the iPhoneOS SDK at `/var/jb/usr/share/SDKs/iPhoneOS.sdk`. Building a package also needs `dpkg-deb`.
 
+The same Makefile also cross-builds on a Mac (or a CI runner) with Xcode — it picks the bootstrap SDK on-device and Xcode's otherwise.
+
 ```sh
 make            # compile, bundle and sign
 make test       # run the test harness
 make install    # install and register the app
 make package    # build a .deb
 ```
+
+## Releasing
+
+GitHub Actions does the rest (see `.github/workflows/release.yml`): every push to `main` is built, attached to a rolling "continuous" release, and published to the Sileo repository as `VERSION-rN`; pushing a tag like `v2.1` publishes a clean `2.1` release. Tagged versions always rank above continuous builds.
 
 ## License
 

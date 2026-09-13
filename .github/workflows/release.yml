@@ -1,0 +1,157 @@
+name: Release
+
+# Builds the .deb on every push to main and on version tags, attaches it to
+# the GitHub Releases tab, and syncs it into the Sileo repository so package
+# managers offer users an update.
+#
+# Publishing to the Sileo repo needs ONE of two backends, chosen by secrets
+# (Settings -> Secrets and variables -> Actions):
+#
+#   Self-hosted server (SSH + rsync):
+#     REPO_SSH_HOST   e.g. reallyitsandi.com
+#     REPO_SSH_USER   ssh user with write access to the repo directory
+#     REPO_SSH_KEY    the private key (contents, PEM/OpenSSH format)
+#     REPO_SSH_PATH   absolute path of the repo root on the server
+#
+#   Git-hosted repo (works if the Sileo repo is served from a git checkout,
+#   e.g. GitHub Pages):
+#     REPO_GIT        https clone URL of the repo's own repository
+#     REPO_TOKEN      a PAT with push access to it
+#
+#   Optional repository variable:
+#     REPO_URL        the URL users enter in Sileo
+#                     (default: https://reallyitsandi.com/repo/)
+#
+# Versioning: a tag push of v2.1 ships as exactly 2.1 and becomes a proper
+# GitHub Release. A push to main ships as "<Makefile VERSION>-r<run number>"
+# (e.g. 2.0-r42), which apt/Sileo ranks above 2.0 but below 2.1 — so every
+# merge to main is an update users are offered, without ever shadowing a
+# real version.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build package
+    runs-on: macos-15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      channel: ${{ steps.version.outputs.channel }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packaging tools
+        run: brew install ldid dpkg
+
+      - name: Work out the version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+            echo "channel=release" >> "$GITHUB_OUTPUT"
+          else
+            base=$(awk '/^VERSION/ { print $NF; exit }' Makefile)
+            echo "version=${base}-r${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+            echo "channel=continuous" >> "$GITHUB_OUTPUT"
+          fi
+          echo "shipping ${{ steps.version.outputs.version }}"
+
+      - name: Build
+        run: make package VERSION="${{ steps.version.outputs.version }}"
+
+      - name: Checksums
+        run: cd build && shasum -a 256 *.deb > SHA256SUMS && cat SHA256SUMS
+
+      - name: Keep the package as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package
+          path: |
+            build/*.deb
+            build/SHA256SUMS
+
+      - name: GitHub Release (tagged version)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF#refs/tags/}" \
+            --title "diffTerm ${{ steps.version.outputs.version }}" \
+            --generate-notes \
+            build/*.deb build/SHA256SUMS
+
+      - name: GitHub Release (rolling continuous build)
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete continuous --yes --cleanup-tag || true
+          gh release create continuous \
+            --prerelease \
+            --title "Continuous build (main)" \
+            --notes "Automatic build of main @ ${GITHUB_SHA}. Not a tagged release; the same deb is published to the Sileo repo." \
+            build/*.deb build/SHA256SUMS
+
+  publish:
+    name: Publish to Sileo repo
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: package
+          path: dist
+
+      # Backend 1: the repo lives on a server we can reach over SSH.
+      - name: Sync over SSH
+        if: ${{ secrets.REPO_SSH_HOST != '' }}
+        env:
+          REPO_SSH_HOST: ${{ secrets.REPO_SSH_HOST }}
+          REPO_SSH_USER: ${{ secrets.REPO_SSH_USER }}
+          REPO_SSH_KEY: ${{ secrets.REPO_SSH_KEY }}
+          REPO_SSH_PATH: ${{ secrets.REPO_SSH_PATH }}
+          REPO_URL: ${{ vars.REPO_URL || 'https://reallyitsandi.com/repo/' }}
+        run: |
+          mkdir -p ~/.ssh repo
+          printf '%s\n' "$REPO_SSH_KEY" > ~/.ssh/repo_key
+          chmod 600 ~/.ssh/repo_key
+          ssh-keyscan -H "$REPO_SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          RSYNC="rsync -a -e ssh -i ~/.ssh/repo_key"
+          $RSYNC "$REPO_SSH_USER@$REPO_SSH_HOST:$REPO_SSH_PATH/" repo/
+          python3 Tools/sync-repo.py --repo-dir repo --deb dist/*.deb --origin "$REPO_URL"
+          $RSYNC repo/ "$REPO_SSH_USER@$REPO_SSH_HOST:$REPO_SSH_PATH/"
+
+      # Backend 2: the repo is itself a git checkout (e.g. GitHub Pages).
+      - name: Sync over git
+        if: ${{ secrets.REPO_SSH_HOST == '' && secrets.REPO_GIT != '' }}
+        env:
+          REPO_GIT: ${{ secrets.REPO_GIT }}
+          REPO_TOKEN: ${{ secrets.REPO_TOKEN }}
+          REPO_URL: ${{ vars.REPO_URL || 'https://reallyitsandi.com/repo/' }}
+        run: |
+          git clone "https://x-access-token:${REPO_TOKEN}@${REPO_GIT#https://}" repo
+          python3 Tools/sync-repo.py --repo-dir repo --deb dist/*.deb --origin "$REPO_URL"
+          cd repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "diffTerm ${{ needs.build.outputs.version }}" || echo "nothing to commit"
+          git push
+
+      - name: No repo backend configured
+        if: ${{ secrets.REPO_SSH_HOST == '' && secrets.REPO_GIT == '' }}
+        run: |
+          echo "::warning::Built the deb and attached it to Releases, but the Sileo repo was NOT updated. Add REPO_SSH_HOST/REPO_SSH_USER/REPO_SSH_KEY/REPO_SSH_PATH (server) or REPO_GIT/REPO_TOKEN (git-hosted) secrets — see the header of .github/workflows/release.yml."

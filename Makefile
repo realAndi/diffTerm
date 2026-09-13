@@ -3,8 +3,10 @@
 # There is no Xcode here, so this drives clang/swiftc directly and assembles
 # the .app bundle by hand.
 
-# The rootless bootstrap has no /bin/sh, so make needs to be told.
-SHELL        := /var/jb/bin/sh
+# The rootless bootstrap has no /bin/sh, so make needs to be told — but a
+# Mac (or a CI runner) doing a cross-build has one. $(wildcard), not $(shell):
+# $(shell) runs through SHELL itself, which on-device does not exist yet.
+SHELL        := $(if $(wildcard /var/jb/bin/sh),/var/jb/bin/sh,/bin/sh)
 
 # Overridable so a second copy can be installed alongside the first:
 #   make install APP_NAME=diffTermDev BUNDLE_ID=dev.diffterm.appdev DISPLAY_NAME="diffTerm (dev)"
@@ -16,7 +18,9 @@ VERSION      ?= 2.0
 # Only the primary install owns the pbcopy/pbpaste links.
 PRIMARY_ID   := dev.diffterm.app
 
-SDK          := /var/jb/usr/share/SDKs/iPhoneOS.sdk
+# The on-device SDK ships with the bootstrap; a cross-build (Mac, CI) uses
+# Xcode's — the xcrun only runs where a /bin/sh exists. Overridable anyway.
+SDK          ?= $(if $(wildcard /var/jb/usr/share/SDKs/iPhoneOS.sdk),/var/jb/usr/share/SDKs/iPhoneOS.sdk,$(shell xcrun --sdk iphoneos --show-sdk-path))
 # One definition. Building for ios16.0 while Info.plist claimed 15.0 meant the
 # binary refused to launch on the very systems the plist invited it onto.
 DEPLOY_MIN   := 14.0
@@ -252,8 +256,7 @@ run: install
 package: $(BINARY)
 	@echo "  DEB   $(BUILD)/$(APP_NAME)_$(VERSION).deb"
 	@rm -rf $(BUILD)/deb
-	@mkdir -p $(BUILD)/deb/DEBIAN $(BUILD)/deb/var/jb/Applications \\
-		$(BUILD)/deb/var/jb/Library/LaunchDaemons
+	@mkdir -p $(BUILD)/deb/DEBIAN $(BUILD)/deb/var/jb/Applications $(BUILD)/deb/var/jb/Library/LaunchDaemons
 	@cp -R $(APP) $(BUILD)/deb/var/jb/Applications/
 	# The daemon plist must ship in the package: without it sessiond is never
 	# loaded, every session silently falls back to a local pty, and shells die
@@ -267,7 +270,8 @@ package: $(BINARY)
 	@printf '#!/bin/sh\nPLIST=/var/jb/Library/LaunchDaemons/dev.diffterm.sessiond.plist\nlaunchctl bootout system "$$PLIST" 2>/dev/null\nlaunchctl bootstrap system "$$PLIST" 2>/dev/null || launchctl load -w "$$PLIST" 2>/dev/null\nuicache -p /var/jb/Applications/$(APP_NAME).app\nexit 0\n' > $(BUILD)/deb/DEBIAN/postinst
 	@printf '#!/bin/sh\nPLIST=/var/jb/Library/LaunchDaemons/dev.diffterm.sessiond.plist\nlaunchctl bootout system "$$PLIST" 2>/dev/null || launchctl unload -w "$$PLIST" 2>/dev/null\nuicache -u /var/jb/Applications/$(APP_NAME).app\nexit 0\n' > $(BUILD)/deb/DEBIAN/prerm
 	@chmod 755 $(BUILD)/deb/DEBIAN/postinst $(BUILD)/deb/DEBIAN/prerm
-	@dpkg-deb -Zgzip -b $(BUILD)/deb $(BUILD)/$(APP_NAME)_$(VERSION).deb
+	# --root-owner-group: build as any user, install as root.
+	@dpkg-deb --root-owner-group -Zgzip -b $(BUILD)/deb $(BUILD)/$(APP_NAME)_$(VERSION).deb
 
 clean:
 	@rm -rf $(BUILD)
