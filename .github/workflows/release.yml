@@ -60,18 +60,19 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
             echo "channel=release" >> "$GITHUB_OUTPUT"
+            echo "shipping ${GITHUB_REF#refs/tags/v} (tagged release)"
           else
             base=$(awk '/^VERSION/ { print $NF; exit }' Makefile)
             echo "version=${base}-r${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
             echo "channel=continuous" >> "$GITHUB_OUTPUT"
+            echo "shipping ${base}-r${GITHUB_RUN_NUMBER} (continuous)"
           fi
-          echo "shipping ${{ steps.version.outputs.version }}"
 
       - name: Build
         run: make package VERSION="${{ steps.version.outputs.version }}"
 
       - name: Checksums
-        run: cd build && shasum -a 256 *.deb > SHA256SUMS && cat SHA256SUMS
+        run: cd build && shasum -a 256 -- *.deb > SHA256SUMS && cat SHA256SUMS
 
       - name: Keep the package as an artifact
         uses: actions/upload-artifact@v4
@@ -107,6 +108,10 @@ jobs:
     name: Publish to Sileo repo
     needs: build
     runs-on: ubuntu-latest
+    env:
+      # The secrets context is not allowed in `if` conditions, only in `env` —
+      # so the backend is picked once here and the steps branch on it.
+      BACKEND: ${{ (secrets.REPO_SSH_HOST != '' && secrets.REPO_SSH_USER != '' && secrets.REPO_SSH_KEY != '' && secrets.REPO_SSH_PATH != '') && 'ssh' || (secrets.REPO_SSH_HOST == '' && secrets.REPO_GIT != '' && secrets.REPO_TOKEN != '') && 'git' || 'none' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -117,7 +122,7 @@ jobs:
 
       # Backend 1: the repo lives on a server we can reach over SSH.
       - name: Sync over SSH
-        if: ${{ secrets.REPO_SSH_HOST != '' }}
+        if: env.BACKEND == 'ssh'
         env:
           REPO_SSH_HOST: ${{ secrets.REPO_SSH_HOST }}
           REPO_SSH_USER: ${{ secrets.REPO_SSH_USER }}
@@ -136,7 +141,7 @@ jobs:
 
       # Backend 2: the repo is itself a git checkout (e.g. GitHub Pages).
       - name: Sync over git
-        if: ${{ secrets.REPO_SSH_HOST == '' && secrets.REPO_GIT != '' }}
+        if: env.BACKEND == 'git'
         env:
           REPO_GIT: ${{ secrets.REPO_GIT }}
           REPO_TOKEN: ${{ secrets.REPO_TOKEN }}
@@ -152,6 +157,6 @@ jobs:
           git push
 
       - name: No repo backend configured
-        if: ${{ secrets.REPO_SSH_HOST == '' && secrets.REPO_GIT == '' }}
+        if: env.BACKEND == 'none'
         run: |
           echo "::warning::Built the deb and attached it to Releases, but the Sileo repo was NOT updated. Add REPO_SSH_HOST/REPO_SSH_USER/REPO_SSH_KEY/REPO_SSH_PATH (server) or REPO_GIT/REPO_TOKEN (git-hosted) secrets — see the header of .github/workflows/release.yml."
