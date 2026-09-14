@@ -20,7 +20,15 @@ enum AppIconManager {
     }()
 
     static var isSupported: Bool {
-        UIApplication.shared.supportsAlternateIcons && !declaredIcons.isEmpty
+        // The silent private setter segfaults inside UIKit on iOS 17: its
+        // completion block dereferences state that is nil when no alternate
+        // icon has ever been set (measured on 17.3 — EXC_BAD_ACCESS in
+        // _setAlternateIconName's block, three launches, three crashes).
+        // Falling back to the public API here would pop a system alert on
+        // every launch and every appearance change, which is worse than a
+        // default icon — so on 17+ the feature is off rather than fatal.
+        if #available(iOS 17, *) { return false }
+        return UIApplication.shared.supportsAlternateIcons && !declaredIcons.isEmpty
     }
 
     /// Applies the icon matching `theme`, or does nothing if the user has
