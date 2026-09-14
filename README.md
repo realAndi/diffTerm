@@ -45,7 +45,9 @@ make package    # build a .deb
 
 ## Releasing
 
-GitHub Actions does the rest (see `.github/workflows/release.yml`): every push to `main` is built, attached to a rolling "continuous" release, and published to the Sileo repository as `VERSION-rN`; pushing a tag like `v2.1` publishes a clean `2.1` release. Tagged versions always rank above continuous builds.
+Publishing goes through the shared ios-port-ci pipeline (see `.github/workflows/release.yml`): a push to `main` rebuilds the package from source and republishes the APT repository as `VERSION-<revision>` (`2.0-1`, `2.0-2`, …) — bump `packaging/revision` when you want Sileo to offer an update. A tag like `v2.1` ships exactly `2.1`. Every published version stays downloadable, so rolling back is a normal package-manager operation.
+
+The repository is signed with its own key, published beside the index as `diffterm.gpg`; reallyitsandi.com pins that fingerprint before syncing it into the source users actually add.
 
 ## License
 

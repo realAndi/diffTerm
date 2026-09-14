@@ -1,162 +1,66 @@
-name: Release
+name: build and publish repo
 
-# Builds the .deb on every push to main and on version tags, attaches it to
-# the GitHub Releases tab, and syncs it into the Sileo repository so package
-# managers offer users an update.
+# diffTerm is a port in the ios-port-ci sense: this repository supplies *what
+# it ships* (the three scripts in tools/, everything in packaging/) and
+# realAndi/ios-port-ci supplies *how it gets published* -- build orchestration,
+# the APT index, GPG signing, the deploy to Pages. See that repo's CONTRACT.md.
 #
-# Publishing to the Sileo repo needs ONE of two backends, chosen by secrets
-# (Settings -> Secrets and variables -> Actions):
-#
-#   Self-hosted server (SSH + rsync):
-#     REPO_SSH_HOST   e.g. reallyitsandi.com
-#     REPO_SSH_USER   ssh user with write access to the repo directory
-#     REPO_SSH_KEY    the private key (contents, PEM/OpenSSH format)
-#     REPO_SSH_PATH   absolute path of the repo root on the server
-#
-#   Git-hosted repo (works if the Sileo repo is served from a git checkout,
-#   e.g. GitHub Pages):
-#     REPO_GIT        https clone URL of the repo's own repository
-#     REPO_TOKEN      a PAT with push access to it
-#
-#   Optional repository variable:
-#     REPO_URL        the URL users enter in Sileo
-#                     (default: https://reallyitsandi.com/repo/)
-#
-# Versioning: a tag push of v2.1 ships as exactly 2.1 and becomes a proper
-# GitHub Release. A push to main ships as "<Makefile VERSION>-r<run number>"
-# (e.g. 2.0-r42), which apt/Sileo ranks above 2.0 but below 2.1 — so every
-# merge to main is an update users are offered, without ever shadowing a
-# real version.
+# Every push to main republishes the current Makefile VERSION with
+# packaging/revision applied (2.0-1, 2.0-2, ...); bump the revision to have
+# Sileo offer an update. A tag push of v2.1 ships as exactly 2.1. All previous
+# versions stay downloadable, so rollback is a normal package operation.
 
 on:
   push:
     branches: [main]
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (blank = the Makefile's VERSION)"
+        required: false
 
+# The reusable workflow needs these, and a caller cannot grant more than it has.
 permissions:
-  contents: write
-
-concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
+  contents: read
+  pages: write
+  id-token: write
 
 jobs:
-  build:
-    name: Build package
-    runs-on: macos-15
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      channel: ${{ steps.version.outputs.channel }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install packaging tools
-        run: brew install ldid dpkg
-
-      - name: Work out the version
-        id: version
-        run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
-            echo "channel=release" >> "$GITHUB_OUTPUT"
-            echo "shipping ${GITHUB_REF#refs/tags/v} (tagged release)"
-          else
-            base=$(awk '/^VERSION/ { print $NF; exit }' Makefile)
-            echo "version=${base}-r${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
-            echo "channel=continuous" >> "$GITHUB_OUTPUT"
-            echo "shipping ${base}-r${GITHUB_RUN_NUMBER} (continuous)"
-          fi
-
-      - name: Build
-        run: make package VERSION="${{ steps.version.outputs.version }}"
-
-      - name: Checksums
-        run: cd build && shasum -a 256 -- *.deb > SHA256SUMS && cat SHA256SUMS
-
-      - name: Keep the package as an artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: package
-          path: |
-            build/*.deb
-            build/SHA256SUMS
-
-      - name: GitHub Release (tagged version)
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "${GITHUB_REF#refs/tags/}" \
-            --title "diffTerm ${{ steps.version.outputs.version }}" \
-            --generate-notes \
-            build/*.deb build/SHA256SUMS
-
-      - name: GitHub Release (rolling continuous build)
-        if: github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release delete continuous --yes --cleanup-tag || true
-          gh release create continuous \
-            --prerelease \
-            --title "Continuous build (main)" \
-            --notes "Automatic build of main @ ${GITHUB_SHA}. Not a tagged release; the same deb is published to the Sileo repo." \
-            build/*.deb build/SHA256SUMS
-
+  # A job that calls a reusable workflow is only `uses:`/`with:`/`secrets:` --
+  # no steps of its own -- so everything below is inputs.
   publish:
-    name: Publish to Sileo repo
-    needs: build
-    runs-on: ubuntu-latest
-    env:
-      # The secrets context is not allowed in `if` conditions, only in `env` —
-      # so the backend is picked once here and the steps branch on it.
-      BACKEND: ${{ (secrets.REPO_SSH_HOST != '' && secrets.REPO_SSH_USER != '' && secrets.REPO_SSH_KEY != '' && secrets.REPO_SSH_PATH != '') && 'ssh' || (secrets.REPO_SSH_HOST == '' && secrets.REPO_GIT != '' && secrets.REPO_TOKEN != '') && 'git' || 'none' }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: package
-          path: dist
-
-      # Backend 1: the repo lives on a server we can reach over SSH.
-      - name: Sync over SSH
-        if: env.BACKEND == 'ssh'
-        env:
-          REPO_SSH_HOST: ${{ secrets.REPO_SSH_HOST }}
-          REPO_SSH_USER: ${{ secrets.REPO_SSH_USER }}
-          REPO_SSH_KEY: ${{ secrets.REPO_SSH_KEY }}
-          REPO_SSH_PATH: ${{ secrets.REPO_SSH_PATH }}
-          REPO_URL: ${{ vars.REPO_URL || 'https://reallyitsandi.com/repo/' }}
-        run: |
-          mkdir -p ~/.ssh repo
-          printf '%s\n' "$REPO_SSH_KEY" > ~/.ssh/repo_key
-          chmod 600 ~/.ssh/repo_key
-          ssh-keyscan -H "$REPO_SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
-          RSYNC="rsync -a -e ssh -i ~/.ssh/repo_key"
-          $RSYNC "$REPO_SSH_USER@$REPO_SSH_HOST:$REPO_SSH_PATH/" repo/
-          python3 Tools/sync-repo.py --repo-dir repo --deb dist/*.deb --origin "$REPO_URL"
-          $RSYNC repo/ "$REPO_SSH_USER@$REPO_SSH_HOST:$REPO_SSH_PATH/"
-
-      # Backend 2: the repo is itself a git checkout (e.g. GitHub Pages).
-      - name: Sync over git
-        if: env.BACKEND == 'git'
-        env:
-          REPO_GIT: ${{ secrets.REPO_GIT }}
-          REPO_TOKEN: ${{ secrets.REPO_TOKEN }}
-          REPO_URL: ${{ vars.REPO_URL || 'https://reallyitsandi.com/repo/' }}
-        run: |
-          git clone "https://x-access-token:${REPO_TOKEN}@${REPO_GIT#https://}" repo
-          python3 Tools/sync-repo.py --repo-dir repo --deb dist/*.deb --origin "$REPO_URL"
-          cd repo
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "diffTerm ${{ needs.build.outputs.version }}" || echo "nothing to commit"
-          git push
-
-      - name: No repo backend configured
-        if: env.BACKEND == 'none'
-        run: |
-          echo "::warning::Built the deb and attached it to Releases, but the Sileo repo was NOT updated. Add REPO_SSH_HOST/REPO_SSH_USER/REPO_SSH_KEY/REPO_SSH_PATH (server) or REPO_GIT/REPO_TOKEN (git-hosted) secrets — see the header of .github/workflows/release.yml."
+    uses: realAndi/ios-port-ci/.github/workflows/publish.yml@v1
+    with:
+      package: dev.diffterm.app
+      origin: diffTerm
+      label: diffTerm
+      # Debian control format: the first line is the summary, continuation
+      # lines are indented by one space, and a lone " ." is a paragraph break.
+      # `|-` and not `|` -- a trailing newline would land a blank line in
+      # Release, which ends the stanza and orphans Date and every checksum
+      # below it.
+      description: |-
+        diffTerm
+         A terminal emulator for jailbroken iOS, built from source in this
+         repository.
+         .
+         Shells are owned by a launchd daemon rather than the app, so
+         backgrounding or force-quitting diffTerm kills nothing; a reopened
+         tab reattaches and replays what it missed. The emulator implements
+         the DEC VT500 state machine, 24-bit colour, mouse reporting, Sixel
+         and iTerm2 inline images, and OSC 133 command blocks.
+      # The Makefile cross-builds with Xcode's iPhoneOS SDK on a Mac; ldid
+      # signs everything. No Go anywhere -- go-version stays unset.
+      brew-packages: ldid
+      # Keeps the published key at the URL the control file and depiction
+      # reference. Each port signs with its OWN key: reallyitsandi.com pins
+      # this fingerprint and refuses an index it cannot verify.
+      key-file: diffterm.gpg
+      # A tag push ships its own version; anything else discovers the Makefile's.
+      version: ${{ inputs.version || (startsWith(github.ref, 'refs/tags/v') && github.ref_name || '') }}
+      payload-paths: |
+        packaging/payload/
+    secrets:
+      GPG_KEY: ${{ secrets.DIFFTERM_GPG_KEY }}
+      GPG_KEY_ID: ${{ secrets.DIFFTERM_GPG_KEY_ID }}

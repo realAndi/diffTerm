@@ -1,0 +1,8 @@
+#!/bin/sh
+# prerm: stop the daemon before the bundle goes away, so KeepAlive does not
+# respawn it against a deleted app. Removing the package removes the plist,
+# which removes the only thing keeping sessiond alive.
+PLIST=/var/jb/Library/LaunchDaemons/dev.diffterm.sessiond.plist
+launchctl bootout system "$PLIST" 2>/dev/null || launchctl unload -w "$PLIST" 2>/dev/null
+uicache -u /var/jb/Applications/diffTerm.app
+exit 0

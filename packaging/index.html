@@ -1,0 +1,33 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>diffTerm</title>
+<style>
+  :root { color-scheme: light dark; --bg:#fff; --fg:#1a1a1a; --muted:#6b6b6b;
+          --rule:#e5e5e5; --card:#f7f7f6; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#141414; --fg:#ececec; --muted:#9a9a9a; --rule:#2c2c2c; --card:#1d1d1d; }
+  }
+  body { margin:0; padding:48px 20px; background:var(--bg); color:var(--fg);
+         font:16px/1.6 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; }
+  main { max-width:620px; margin:0 auto; }
+  h1 { font-size:26px; margin:0 0 4px; letter-spacing:-0.02em; }
+  .sub { color:var(--muted); margin-bottom:28px; }
+  code { font:13.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+         background:var(--card); padding:2px 6px; border-radius:5px; }
+  .url { display:block; background:var(--card); border:1px solid var(--rule);
+         border-radius:10px; padding:14px 16px; margin:18px 0 24px;
+         font:14px ui-monospace, Menlo, monospace; word-break:break-all; }
+  a { color:inherit; }
+</style>
+<main>
+  <h1>diffTerm</h1>
+  <div class="sub">An APT repository — add it in Sileo.</div>
+  <div class="url" id="u">…</div>
+  <p>Provides <strong>diffTerm</strong>: a terminal emulator for jailbroken iOS
+     whose shells are owned by a launchd daemon, so backgrounding or
+     force-quitting the app kills nothing. The package page is a native
+     depiction your package manager renders itself; the source is
+     <a href="https://github.com/realAndi/diffTerm">on GitHub</a>.</p>
+  <script>document.getElementById('u').textContent = location.origin + location.pathname;</script>
+</main>

@@ -1,0 +1,12 @@
+#!/bin/sh
+# postinst: register the app and load the session daemon.
+#
+# diffterm-sessiond owns each shell's pty from outside the app's process
+# coalition, which is why backgrounding or force-quitting diffTerm does not
+# kill what is running. It ships in the bundle; this loads it. Idempotent:
+# bootout first so an upgrade re-bootstraps rather than erroring.
+PLIST=/var/jb/Library/LaunchDaemons/dev.diffterm.sessiond.plist
+launchctl bootout system "$PLIST" 2>/dev/null
+launchctl bootstrap system "$PLIST" 2>/dev/null || launchctl load -w "$PLIST" 2>/dev/null
+uicache -p /var/jb/Applications/diffTerm.app
+exit 0

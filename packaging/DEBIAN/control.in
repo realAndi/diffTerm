@@ -1,0 +1,29 @@
+Package: dev.diffterm.app
+Name: diffTerm
+Version: @VERSION@
+Architecture: iphoneos-arm64
+Maintainer: andi <tafilajandi@gmail.com>
+Author: andi
+Section: Terminal_Support
+Priority: optional
+Depends: firmware (>= 14.0)
+Icon: https://raw.githubusercontent.com/@REPO@/main/assets/icon.png
+Native-Depiction: https://@PAGES@/depiction.json
+SileoDepiction: https://@PAGES@/depiction.json
+Tag: role::hacker
+Description: A different terminal to use
+ A real shell on your jailbroken iPhone or iPad, drawn the way a terminal is
+ supposed to be.
+ .
+ The emulator is written from scratch against the DEC VT500 state diagram:
+ VT100/VT220/xterm controls, 24-bit colour, the alternate screen, scroll
+ regions, mouse reporting, Sixel and iTerm2 inline images. Conformance is
+ measured with esctest rather than claimed.
+ .
+ Shells are owned by a launchd daemon, not the app, so backgrounding or
+ force-quitting diffTerm does not kill what is running; a reopened tab
+ reattaches and replays what it missed.
+ .
+ OSC 133 shell integration marks every command, so you can jump between
+ prompts, copy one command's output, and see exit codes and run times.
+ Autosuggestions and command completion cover 700+ tools.

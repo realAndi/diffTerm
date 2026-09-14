@@ -1,0 +1,107 @@
+{
+  "class": "DepictionTabView",
+  "minVersion": "0.1",
+  "tintColor": "#4A9EBF",
+  "tabs": [
+    {
+      "class": "DepictionStackView",
+      "tabname": "Details",
+      "views": [
+        {
+          "class": "DepictionMarkdownView",
+          "useSpacing": true,
+          "useRawFormat": false,
+          "markdown": "A different terminal to use. diffTerm runs a real shell on your jailbroken iPhone or iPad and draws it the way a terminal is supposed to be drawn, so the tools you already use behave the way you expect."
+        },
+        { "class": "DepictionSeparatorView" },
+        {
+          "class": "DepictionSubheaderView",
+          "title": "Your shells outlive the app",
+          "useBoldText": true,
+          "useBottomMargin": true
+        },
+        {
+          "class": "DepictionMarkdownView",
+          "useSpacing": true,
+          "useRawFormat": false,
+          "markdown": "Shells are owned by `sessiond`, a daemon launchd keeps alive outside the app. Background diffTerm mid-build, lock the phone, even force-quit: the shell keeps running. Reopen the tab and it reattaches, replaying everything you missed."
+        },
+        { "class": "DepictionSeparatorView" },
+        {
+          "class": "DepictionSubheaderView",
+          "title": "A real emulator",
+          "useBoldText": true,
+          "useBottomMargin": true
+        },
+        {
+          "class": "DepictionMarkdownView",
+          "useSpacing": true,
+          "useRawFormat": false,
+          "markdown": "Written from scratch against the DEC VT500 state diagram rather than by pattern-matching escape sequences: VT100, VT220 and xterm controls, 24-bit colour, the alternate screen, scroll regions, mouse reporting (X10 through SGR), synchronized updates, Sixel graphics and iTerm2 inline images (`imgcat`). Accuracy is measured with esctest."
+        },
+        { "class": "DepictionSeparatorView" },
+        {
+          "class": "DepictionSubheaderView",
+          "title": "Knows where commands begin and end",
+          "useBoldText": true,
+          "useBottomMargin": true
+        },
+        {
+          "class": "DepictionMarkdownView",
+          "useSpacing": true,
+          "useRawFormat": false,
+          "markdown": "Shell integration marks (OSC 133) turn your scrollback into command blocks: tap to copy one command's output, jump between prompts, see exit codes and how long things took. Fish and zsh integrations ship in the bundle."
+        },
+        { "class": "DepictionSeparatorView" },
+        {
+          "class": "DepictionSubheaderView",
+          "title": "At a glance",
+          "useBoldText": true,
+          "useBottomMargin": true
+        },
+        { "class": "DepictionTableTextView", "title": "Version", "text": "@VERSION@" },
+        { "class": "DepictionTableTextView", "title": "Package", "text": "dev.diffterm.app" },
+        { "class": "DepictionTableTextView", "title": "Emulation", "text": "VT100 / VT220 / xterm, 24-bit colour" },
+        { "class": "DepictionTableTextView", "title": "Graphics", "text": "Sixel, iTerm2 inline images" },
+        { "class": "DepictionTableTextView", "title": "Completion", "text": "700+ tools, from Fig's specs" },
+        {
+          "class": "DepictionTableButtonView",
+          "title": "Source and write-up",
+          "action": "https://github.com/realAndi/diffTerm",
+          "openExternal": true
+        }
+      ]
+    },
+    {
+      "class": "DepictionStackView",
+      "tabname": "Requires",
+      "views": [
+        {
+          "class": "DepictionMarkdownView",
+          "useSpacing": true,
+          "useRawFormat": false,
+          "markdown": "- A rootless jailbreak (`/var/jb`), iOS 14 or later, arm64.\n- Nothing else: everything it needs ships in the package.\n\nThe iPad layout is implemented but has not been run on real hardware."
+        }
+      ]
+    },
+    {
+      "class": "DepictionStackView",
+      "tabname": "Notes",
+      "views": [
+        {
+          "class": "DepictionMarkdownView",
+          "useSpacing": true,
+          "useRawFormat": false,
+          "markdown": "**Persistence.** `sessiond` starts at install and keeps running across app launches. Closing a tab kills that tab's shell, as you would expect; backgrounding the app kills nothing."
+        },
+        { "class": "DepictionSeparatorView" },
+        {
+          "class": "DepictionMarkdownView",
+          "useSpacing": true,
+          "useRawFormat": false,
+          "markdown": "**Updates.** Builds publish automatically from the source repository. Every version stays downloadable here, so rolling back is a normal package-manager operation."
+        }
+      ]
+    }
+  ]
+}

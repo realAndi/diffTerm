@@ -167,8 +167,8 @@ HARNESS_SRC  := $(wildcard Sources/Core/*.swift) \
                 $(wildcard Sources/Settings/*.swift) \
                 $(wildcard Sources/UI/*.swift) \
                 $(APP_SRC_NOMAIN) \
-                Tools/IconRenderer.swift \
-                Tools/SpecConverter.swift \
+                devtools/IconRenderer.swift \
+                devtools/SpecConverter.swift \
                 Tests/Harness.swift
 
 # The harness links the same code as the app minus its @main, so the checks
