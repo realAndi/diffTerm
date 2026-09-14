@@ -1,8 +1,14 @@
 import Foundation
 
 enum DiffTermVersion {
-    static let short = "1.0"
-    static let full  = "diffTerm 1.0"
+    /// The version this build was made from. The Makefile stamps
+    /// CFBundleShortVersionString from $(VERSION) when it assembles the
+    /// bundle, so the Makefile is the only place a version is written; the
+    /// literal below only covers processes without an app bundle, which is
+    /// the test harness.
+    static let short: String =
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "2.1"
+    static var full: String { "diffTerm \(short)" }
 }
 
 extension Emulator {

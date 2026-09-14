@@ -13,7 +13,7 @@ SHELL        := $(if $(wildcard /var/jb/bin/sh),/var/jb/bin/sh,/bin/sh)
 APP_NAME     ?= diffTerm
 BUNDLE_ID    ?= dev.diffterm.app
 DISPLAY_NAME ?= $(APP_NAME)
-VERSION      ?= 2.0
+VERSION      ?= 2.1
 
 # Only the primary install owns the pbcopy/pbpaste links.
 PRIMARY_ID   := dev.diffterm.app
@@ -135,7 +135,7 @@ $(BINARY): $(SWIFT_SRC) $(C_OBJ) $(BRIDGE) Resources/Info.plist Resources/Entitl
 	@# Not plutil: the one in the bootstrap takes -key/-value, not -replace,
 	@# and exits 0 while printing "File not found" for the argument it did
 	@# not understand, so a wrong bundle id would ship silently.
-	@python3 -c "import plistlib; f='$(APP)/Info.plist'; p=plistlib.load(open(f,'rb')); p['CFBundleIdentifier']='$(BUNDLE_ID)'; p['CFBundleExecutable']='$(APP_NAME)'; p['CFBundleName']='$(APP_NAME)'; p['CFBundleDisplayName']='$(DISPLAY_NAME)'; plistlib.dump(p, open(f,'wb'))"
+	@python3 -c "import plistlib; f='$(APP)/Info.plist'; p=plistlib.load(open(f,'rb')); p['CFBundleIdentifier']='$(BUNDLE_ID)'; p['CFBundleExecutable']='$(APP_NAME)'; p['CFBundleName']='$(APP_NAME)'; p['CFBundleDisplayName']='$(DISPLAY_NAME)'; p['CFBundleShortVersionString']='$(VERSION)'; p['CFBundleVersion']='$(VERSION)'; plistlib.dump(p, open(f,'wb'))"
 	@# Clear stale resources first: the bundle is assembled in place, so a
 	@# file deleted from Resources would otherwise linger in the app forever.
 	@rm -f $(APP)/*.png $(APP)/*.ttf
