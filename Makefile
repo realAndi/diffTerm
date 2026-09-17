@@ -13,7 +13,7 @@ SHELL        := $(if $(wildcard /var/jb/bin/sh),/var/jb/bin/sh,/bin/sh)
 APP_NAME     ?= diffTerm
 BUNDLE_ID    ?= dev.diffterm.app
 DISPLAY_NAME ?= $(APP_NAME)
-VERSION      ?= 2.2
+VERSION      ?= 2.2.1
 
 # Only the primary install owns the pbcopy/pbpaste links.
 PRIMARY_ID   := dev.diffterm.app

@@ -7,7 +7,7 @@ enum DiffTermVersion {
     /// literal below only covers processes without an app bundle, which is
     /// the test harness.
     static let short: String =
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "2.2"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "2.2.1"
     static var full: String { "diffTerm \(short)" }
 }
 

@@ -562,8 +562,25 @@ final class TerminalSession: NSObject {
         env["COLORTERM"] = "truecolor"
         env["TERM_PROGRAM"] = "diffTerm"
         env["TERM_PROGRAM_VERSION"] = DiffTermVersion.short
-        env["LANG"] = env["LANG"] ?? "en_US.UTF-8"
-        env["LC_CTYPE"] = env["LC_CTYPE"] ?? "en_US.UTF-8"
+        // `LC_CTYPE` is what decides whether the shell and everything it runs
+        // treat input as UTF-8, and it outranks `LANG`, so setting it is both
+        // necessary and enough. Setting *only* it is deliberate: the one value
+        // iOS accepts for the character type is the bare codeset `UTF-8`,
+        // which is not a complete locale, and as `$LANG` it would make
+        // `setlocale(LC_ALL, "")` fail and drop the shell back to US-ASCII.
+        //
+        // An inherited `LANG` or `LC_ALL` naming a locale this device does not
+        // have is dropped rather than passed along. `LC_ALL` outranks the
+        // value set here, so leaving a bad one in place would crash bash in
+        // readline exactly as before — see `UserEnvironment.ctypeLocale`.
+        if let ctype = UserEnvironment.ctypeLocale {
+            env["LC_CTYPE"] = ctype
+            for key in ["LANG", "LC_ALL"] {
+                if let value = env[key], !UserEnvironment.isCompleteLocale(value) {
+                    env.removeValue(forKey: key)
+                }
+            }
+        }
         // HOME must match the passwd database the rest of the bootstrap uses,
         // or the shell reads no rc files, ssh finds no keys and git finds no
         // config — all while appearing to work.

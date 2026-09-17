@@ -44,6 +44,7 @@ struct Harness {
         shellIntegrationTests()
         sessionRestoreTests()
         logicalPathTests()
+        localeTests()
         startDirectoryTests()
         iconTests()
         keyRowTests()
@@ -3120,6 +3121,65 @@ struct Harness {
         if root != "/var/jb" {
             expectEqual(UserEnvironment.logicalPath(root + "extra/x"),
                         root + "extra/x", "a partial prefix match is left alone")
+        }
+
+        print("")
+    }
+
+    /// Regression cover for the crash that made an interactive bash impossible.
+    ///
+    /// iOS has one compiled locale, named after the bare codeset, so the
+    /// conventional `en_US.UTF-8` does not resolve and `setlocale` returns
+    /// NULL for it. readline 8.2 dereferences that NULL, so bash died with
+    /// SIGSEGV in `rl_initialize` before its first prompt, while zsh — which
+    /// uses ZLE, not readline — was unaffected. That asymmetry is why this
+    /// went unseen: the default shell here is zsh.
+    static func localeTests() {
+        print("locale")
+
+        guard let ctype = UserEnvironment.ctypeLocale else {
+            // Not a failure. A system with no UTF-8 character type at all is
+            // one where the right move is to export nothing, and that is what
+            // `environment()` does.
+            print("  · no UTF-8 locale on this device; nothing is exported")
+            print("")
+            return
+        }
+
+        expect(UserEnvironment.isCompleteLocale("C"), "C is a complete locale")
+        expect(!UserEnvironment.isCompleteLocale("nonsense.locale"),
+               "a locale that does not exist is rejected")
+        expect(UserEnvironment.isCompleteLocale(""),
+               "an empty value defers to the environment and is left alone")
+
+        // The value has to give a real UTF-8 character type, or box drawing
+        // and every multibyte paste breaks.
+        if let locale = newlocale(LC_CTYPE_MASK, ctype, nil) {
+            defer { freelocale(locale) }
+            let codeset = nl_langinfo_l(CODESET, locale).map { String(cString: $0) } ?? ""
+            expectEqual(codeset.uppercased(), "UTF-8",
+                        "the exported LC_CTYPE really is UTF-8")
+        } else {
+            expect(false, "the exported LC_CTYPE resolves")
+        }
+
+        let env = TerminalSession.environment()
+        expectEqual(env["LC_CTYPE"], ctype, "the session exports the resolved LC_CTYPE")
+
+        // `UTF-8` is a character type, not a locale, so it must not leak into
+        // `$LANG`, where it would make setlocale(LC_ALL, "") fail outright and
+        // cost us the character type we just went to the trouble of setting.
+        if let lang = env["LANG"] {
+            expect(UserEnvironment.isCompleteLocale(lang),
+                   "$LANG names a complete locale", "got \(lang)")
+        } else {
+            print("  · LANG is left unset, which is correct on this device")
+        }
+        // An LC_ALL this device lacks would outrank LC_CTYPE and bring the
+        // crash straight back.
+        if let all = env["LC_ALL"] {
+            expect(UserEnvironment.isCompleteLocale(all),
+                   "$LC_ALL names a complete locale", "got \(all)")
         }
 
         print("")

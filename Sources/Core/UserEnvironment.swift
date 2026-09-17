@@ -45,6 +45,62 @@ enum UserEnvironment {
     static var userName: String { cached.name }
     static var loginShell: String { cached.shell }
 
+    /// What to hand the shell as `$LC_CTYPE`, or nil if nothing on this device
+    /// gives a UTF-8 character type.
+    ///
+    /// Terminals conventionally export `en_US.UTF-8`, and on iOS that is not a
+    /// cosmetic mistake but a crash. The system ships exactly one compiled
+    /// locale — `/usr/share/locale/UTF-8`, named after the bare codeset — so
+    /// `setlocale(LC_CTYPE, "en_US.UTF-8")` returns NULL here. readline 8.2
+    /// dereferences that NULL inside `_rl_init_locale`, which means bash dies
+    /// with SIGSEGV in `rl_initialize` before printing its first prompt: an
+    /// interactive bash was impossible in diffTerm, and is impossible in any
+    /// other terminal that exports the conventional value. zsh never showed
+    /// it because it uses ZLE rather than readline.
+    ///
+    /// So ask the system rather than assuming. `newlocale` answers the same
+    /// question `setlocale` would without changing this process's own locale,
+    /// which matters because `environment()` is not the only thread running.
+    static let ctypeLocale: String? = {
+        // Conventional names first, so an iOS that does ship them is used the
+        // way it would be anywhere else; the bare codeset is the fallback that
+        // actually resolves today.
+        for name in ["en_US.UTF-8", "C.UTF-8", "UTF-8"] where isUTF8CType(name) {
+            return name
+        }
+        return nil
+    }()
+
+    /// Whether `name` names a locale whose character type is UTF-8.
+    private static func isUTF8CType(_ name: String) -> Bool {
+        guard let locale = newlocale(LC_CTYPE_MASK, name, nil) else { return false }
+        defer { freelocale(locale) }
+        guard let codeset = nl_langinfo_l(CODESET, locale) else { return false }
+        return String(cString: codeset).caseInsensitiveCompare("UTF-8") == .orderedSame
+    }
+
+    /// Whether `name` names a locale complete enough for `$LANG` or `$LC_ALL`,
+    /// which stand in for every category rather than just the character type.
+    ///
+    /// The distinction is the whole reason a terminal has to treat those two
+    /// differently from `LC_CTYPE`: `UTF-8` is a perfectly good character type
+    /// here and not a locale, so using it for `$LANG` makes
+    /// `setlocale(LC_ALL, "")` fail and takes the character type down with it.
+    static func isCompleteLocale(_ name: String) -> Bool {
+        // An empty value means "consult the environment", which is harmless.
+        guard !name.isEmpty else { return true }
+        guard let locale = newlocale(allLocaleCategories, name, nil) else { return false }
+        freelocale(locale)
+        return true
+    }
+
+    /// `LC_ALL_MASK`, spelled out. The header defines it by or-ing the six
+    /// category masks together, and a composite macro like that does not
+    /// survive being imported into Swift.
+    private static let allLocaleCategories =
+        LC_COLLATE_MASK | LC_CTYPE_MASK | LC_MESSAGES_MASK
+        | LC_MONETARY_MASK | LC_NUMERIC_MASK | LC_TIME_MASK
+
     /// The home directory the *system's* passwd database gives, which is
     /// deliberately not the one above.
     ///
