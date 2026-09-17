@@ -58,26 +58,17 @@ enum UserEnvironment {
     /// other terminal that exports the conventional value. zsh never showed
     /// it because it uses ZLE rather than readline.
     ///
-    /// So ask the system rather than assuming. `newlocale` answers the same
-    /// question `setlocale` would without changing this process's own locale,
-    /// which matters because `environment()` is not the only thread running.
+    /// So ask the system rather than assuming, through the C bridge — see
+    /// `dt_locale_is_utf8` for why the question cannot be asked from Swift.
     static let ctypeLocale: String? = {
         // Conventional names first, so an iOS that does ship them is used the
         // way it would be anywhere else; the bare codeset is the fallback that
         // actually resolves today.
-        for name in ["en_US.UTF-8", "C.UTF-8", "UTF-8"] where isUTF8CType(name) {
+        for name in ["en_US.UTF-8", "C.UTF-8", "UTF-8"] where dt_locale_is_utf8(name) != 0 {
             return name
         }
         return nil
     }()
-
-    /// Whether `name` names a locale whose character type is UTF-8.
-    private static func isUTF8CType(_ name: String) -> Bool {
-        guard let locale = newlocale(LC_CTYPE_MASK, name, nil) else { return false }
-        defer { freelocale(locale) }
-        guard let codeset = nl_langinfo_l(CODESET, locale) else { return false }
-        return String(cString: codeset).caseInsensitiveCompare("UTF-8") == .orderedSame
-    }
 
     /// Whether `name` names a locale complete enough for `$LANG` or `$LC_ALL`,
     /// which stand in for every category rather than just the character type.
@@ -89,17 +80,8 @@ enum UserEnvironment {
     static func isCompleteLocale(_ name: String) -> Bool {
         // An empty value means "consult the environment", which is harmless.
         guard !name.isEmpty else { return true }
-        guard let locale = newlocale(allLocaleCategories, name, nil) else { return false }
-        freelocale(locale)
-        return true
+        return dt_locale_is_complete(name) != 0
     }
-
-    /// `LC_ALL_MASK`, spelled out. The header defines it by or-ing the six
-    /// category masks together, and a composite macro like that does not
-    /// survive being imported into Swift.
-    private static let allLocaleCategories =
-        LC_COLLATE_MASK | LC_CTYPE_MASK | LC_MESSAGES_MASK
-        | LC_MONETARY_MASK | LC_NUMERIC_MASK | LC_TIME_MASK
 
     /// The home directory the *system's* passwd database gives, which is
     /// deliberately not the one above.

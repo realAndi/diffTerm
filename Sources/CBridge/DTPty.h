@@ -47,4 +47,20 @@ pid_t dt_foreground_pid(int master);
 /// which is what makes a signal sent after a 1 here reach the right process.
 int dt_child_running(pid_t pid);
 
+/// 1 if `name` names a locale whose character type is UTF-8, 0 otherwise.
+///
+/// Asked in C because Swift's Darwin module does not export `nl_langinfo_l`
+/// on every SDK — the declaration is behind `_USE_EXTENDED_LOCALES_`, and
+/// which toolchain re-exports it differs between the on-device Procursus
+/// swiftc and the one in CI. The C declaration is in both, so the question
+/// gets asked here and Swift only sees the answer.
+///
+/// `newlocale` rather than `setlocale`: this must not disturb the process's
+/// own locale, on whatever thread happens to ask first.
+int dt_locale_is_utf8(const char *name);
+
+/// 1 if `name` is a locale complete enough for `$LANG` or `$LC_ALL`, which
+/// stand in for every category rather than just the character type.
+int dt_locale_is_complete(const char *name);
+
 #endif

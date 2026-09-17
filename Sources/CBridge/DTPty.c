@@ -7,6 +7,11 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <paths.h>
+#include <strings.h>
+/* xlocale.h defines _USE_EXTENDED_LOCALES_, which is what makes
+   langinfo.h declare nl_langinfo_l; the order matters. */
+#include <xlocale.h>
+#include <langinfo.h>
 
 int dt_spawn_pty(const char *path,
                  char *const argv[],
@@ -154,4 +159,22 @@ int dt_signal_foreground(int master, pid_t fallback_pid, int sig) {
         if (kill(fallback_pid, sig) == 0) return 0;
     }
     return -errno;
+}
+
+int dt_locale_is_utf8(const char *name) {
+    if (!name) return 0;
+    locale_t loc = newlocale(LC_CTYPE_MASK, name, NULL);
+    if (!loc) return 0;
+    const char *codeset = nl_langinfo_l(CODESET, loc);
+    int utf8 = codeset != NULL && strcasecmp(codeset, "UTF-8") == 0;
+    freelocale(loc);
+    return utf8;
+}
+
+int dt_locale_is_complete(const char *name) {
+    if (!name) return 0;
+    locale_t loc = newlocale(LC_ALL_MASK, name, NULL);
+    if (!loc) return 0;
+    freelocale(loc);
+    return 1;
 }

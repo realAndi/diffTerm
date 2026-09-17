@@ -3154,14 +3154,10 @@ struct Harness {
 
         // The value has to give a real UTF-8 character type, or box drawing
         // and every multibyte paste breaks.
-        if let locale = newlocale(LC_CTYPE_MASK, ctype, nil) {
-            defer { freelocale(locale) }
-            let codeset = nl_langinfo_l(CODESET, locale).map { String(cString: $0) } ?? ""
-            expectEqual(codeset.uppercased(), "UTF-8",
-                        "the exported LC_CTYPE really is UTF-8")
-        } else {
-            expect(false, "the exported LC_CTYPE resolves")
-        }
+        expect(dt_locale_is_utf8(ctype) != 0,
+               "the exported LC_CTYPE really is UTF-8")
+        expect(dt_locale_is_utf8("definitely.not.a.locale") == 0,
+               "and a locale that does not exist is not mistaken for UTF-8")
 
         let env = TerminalSession.environment()
         expectEqual(env["LC_CTYPE"], ctype, "the session exports the resolved LC_CTYPE")
