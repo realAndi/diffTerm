@@ -23,6 +23,9 @@ final class TabBarView: UIView {
     private let hairline = UIView()
 
     private var chips: [TabChip] = []
+    private var lastTitles: [String] = []
+    private var lastStatuses: [CommandStatus] = []
+    private var lastSelectedIndex: Int?
     private(set) var selectedIndex = 0
 
     /// The strip is painted from the palette rather than from a system
@@ -171,6 +174,17 @@ final class TabBarView: UIView {
     }
 
     func reload(titles: [String], statuses: [CommandStatus], selected: Int) {
+        let selectionChanged = selected != lastSelectedIndex
+        let statusesUnchanged = statuses.elementsEqual(lastStatuses) { lhs, rhs in
+            switch (lhs, rhs) {
+            case (.none, .none), (.running, .running), (.failed, .failed): return true
+            default: return false
+            }
+        }
+        guard selectionChanged || titles != lastTitles || !statusesUnchanged else { return }
+        lastTitles = titles
+        lastStatuses = statuses
+        lastSelectedIndex = selected
         selectedIndex = selected
 
         while chips.count > titles.count {
@@ -201,7 +215,7 @@ final class TabBarView: UIView {
         }
 
         // A tab selected by keyboard shortcut may be off-screen.
-        if selected < chips.count {
+        if selectionChanged, chips.indices.contains(selected) {
             let chip = chips[selected]
             layoutIfNeeded()
             scrollView.scrollRectToVisible(chip.frame.insetBy(dx: -12, dy: 0), animated: true)

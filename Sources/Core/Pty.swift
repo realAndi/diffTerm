@@ -19,7 +19,7 @@ enum PtyError: LocalizedError {
 /// Reads run on a private serial queue and are handed up in whatever chunk
 /// size the kernel gives us; batching for the sake of the UI is the session's
 /// job, not this class's.
-final class Pty: SessionTransport {
+final class Pty {
 
     private(set) var masterFD: Int32 = -1
     private(set) var pid: pid_t = -1
@@ -36,14 +36,25 @@ final class Pty: SessionTransport {
     private var processSource: DispatchSourceProcess?
 
     /// Bytes accepted from the UI that the pty was not ready to take yet.
+    /// Everything before `writeOffset` has already gone out.
     private var pendingWrites: [UInt8] = []
+    private var writeOffset = 0
     private let pendingLock = NSLock()
 
     private var readBuffer = [UInt8](repeating: 0, count: 1 << 16)
 
     deinit {
         tearDownWriteSource()
-        closeDescriptors()
+        processSource?.cancel()
+        if let readSource {
+            readSource.cancel()       // its cancel handler closes the descriptor
+        } else if masterFD >= 0 {
+            close(masterFD)
+        }
+        // Closing a tab with something still running drops the Pty straight
+        // after `terminate()`. Nothing here would ever call waitpid again, so
+        // the child was left a zombie; hand it to something that outlives us.
+        if pid > 0, !didFinish { Pty.reapWhenExited(pid) }
     }
 
     // MARK: - Lifecycle
@@ -89,7 +100,11 @@ final class Pty: SessionTransport {
     private func startReading() {
         let source = DispatchSource.makeReadSource(fileDescriptor: masterFD, queue: ioQueue)
         source.setEventHandler { [weak self] in self?.handleReadable() }
-        source.setCancelHandler { [weak self] in self?.closeDescriptors() }
+        // The descriptor, not `self`: this also runs when the source is
+        // cancelled from `deinit`, where a weak reference is already nil and
+        // the close would never happen.
+        let fd = masterFD
+        source.setCancelHandler { close(fd) }
         readSource = source
         source.resume()
     }
@@ -164,9 +179,10 @@ final class Pty: SessionTransport {
 
         if let readSrc {
             readSrc.cancel()      // cancel handler closes the descriptor
-        } else {
-            closeDescriptors()
+        } else if masterFD >= 0 {
+            close(masterFD)
         }
+        masterFD = -1
 
         let code = exitCode
         DispatchQueue.main.async { [weak self] in
@@ -174,21 +190,54 @@ final class Pty: SessionTransport {
         }
     }
 
-    private func closeDescriptors() {
-        if masterFD >= 0 {
-            close(masterFD)
-            masterFD = -1
-        }
-    }
-
     /// Asks the child to quit, escalating if it ignores the request.
     func terminate() {
         guard isRunning, pid > 0 else { return }
         _ = dt_signal_foreground(masterFD, pid, SIGHUP)
+        // Captured now, while the descriptor is still ours to ask.
         let target = pid
-        ioQueue.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            guard let self, self.isRunning, self.pid == target else { return }
-            _ = dt_signal_foreground(self.masterFD, target, SIGKILL)
+        let group = dt_foreground_pid(masterFD)
+        // No `self` in here: closing a tab releases the Pty right after this
+        // call, and a weak reference made the escalation a no-op for exactly
+        // the case it exists for. `dt_child_running` never reaps, and an
+        // unreaped pid cannot be reused, so the kill cannot hit a stranger.
+        ioQueue.asyncAfter(deadline: .now() + 1.5) {
+            guard dt_child_running(target) == 1 else { return }
+            if group > 0, group != target { _ = killpg(group, SIGKILL) }
+            _ = kill(target, SIGKILL)
+        }
+    }
+
+    // MARK: - Orphan reaping
+
+    private static let reaperQueue = DispatchQueue(label: "dev.diffterm.pty.reaper")
+    /// Sources for children whose Pty is gone, kept alive until they fire.
+    private static var orphanSources: [pid_t: DispatchSourceProcess] = [:]
+
+    /// Waits for `pid` to exit and reaps it, independent of any Pty.
+    private static func reapWhenExited(_ pid: pid_t) {
+        reaperQueue.async {
+            func reap() -> Bool {
+                var status: Int32 = 0
+                let r = waitpid(pid, &status, WNOHANG)
+                return r == pid || (r < 0 && errno == ECHILD)
+            }
+            guard orphanSources[pid] == nil, !reap() else { return }
+            let source = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit,
+                                                          queue: reaperQueue)
+            source.setEventHandler {
+                guard reap() else { return }
+                orphanSources[pid]?.cancel()
+                orphanSources[pid] = nil
+            }
+            orphanSources[pid] = source
+            source.resume()
+            // The child may have exited between the first check and the
+            // source being armed, in which case no event is coming.
+            if reap() {
+                source.cancel()
+                orphanSources[pid] = nil
+            }
         }
     }
 
@@ -221,7 +270,7 @@ final class Pty: SessionTransport {
         pendingLock.lock()
         // Bound the backlog: if a program has stopped reading (^S, or a
         // stopped job) we must not let paste data grow without limit.
-        if pendingWrites.count + bytes.count > 1 << 22 {
+        if pendingWrites.count - writeOffset + bytes.count > 1 << 22 {
             pendingLock.unlock()
             return
         }
@@ -237,43 +286,41 @@ final class Pty: SessionTransport {
     /// Everything here runs on `ioQueue`, so the source's suspend/resume
     /// balance needs no locking — but it does need to be exact: an unbalanced
     /// suspend traps when the source is released.
+    ///
+    /// A pty takes about a kilobyte per write. Copying the whole backlog out
+    /// and shifting it down after each of those made a large paste quadratic,
+    /// so writes go straight from the buffer and only an offset moves; the
+    /// written prefix is reclaimed once it is most of the buffer. The lock is
+    /// held across the writes, which never block on this descriptor.
     private func drainWrites() {
         guard masterFD >= 0 else { return }
-        while true {
-            pendingLock.lock()
-            if pendingWrites.isEmpty {
-                pendingLock.unlock()
-                suspendWriteSource()
-                return
+        pendingLock.lock()
+        defer { pendingLock.unlock() }
+        while writeOffset < pendingWrites.count {
+            let written = pendingWrites.withUnsafeBytes { buf -> Int in
+                Darwin.write(masterFD, buf.baseAddress! + writeOffset, buf.count - writeOffset)
             }
-            let chunk = pendingWrites
-            pendingLock.unlock()
-
-            let written = chunk.withUnsafeBytes { buf -> Int in
-                Darwin.write(masterFD, buf.baseAddress, buf.count)
-            }
-
             if written > 0 {
-                pendingLock.lock()
-                pendingWrites.removeFirst(min(written, pendingWrites.count))
-                pendingLock.unlock()
+                writeOffset += written
                 continue
             }
-
             let err = errno
             if err == EINTR { continue }
             if err == EAGAIN || err == EWOULDBLOCK {
+                if writeOffset > pendingWrites.count / 2 {
+                    pendingWrites.removeFirst(writeOffset)
+                    writeOffset = 0
+                }
                 resumeWriteSource()
                 return
             }
             // Anything else means the pty is gone; drop the backlog rather
             // than spinning on a dead descriptor.
-            pendingLock.lock()
-            pendingWrites.removeAll()
-            pendingLock.unlock()
-            suspendWriteSource()
-            return
+            break
         }
+        pendingWrites.removeAll(keepingCapacity: pendingWrites.count <= 1 << 16)
+        writeOffset = 0
+        suspendWriteSource()
     }
 
     private var writeSourceActive = false

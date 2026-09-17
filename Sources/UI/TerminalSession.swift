@@ -25,12 +25,8 @@ final class TerminalSession: NSObject {
     weak var delegate: TerminalSessionDelegate?
 
     let emulator: Emulator
-    private var transport: SessionTransport = Pty()
-
-    /// A stable id for this session in the launchd daemon, so a reattach after
-    /// the app was killed finds the same shell. Random per new session; a
-    /// restored session carries its own forward. Non-zero.
-    var daemonSessionID: UInt32 = UInt32.random(in: 1...UInt32.max)
+    /// The shell is the app's own child, so it ends when the app does.
+    private var pty = Pty()
 
     private(set) var isRunning = false
     private(set) var exitCode: Int32?
@@ -53,9 +49,10 @@ final class TerminalSession: NSObject {
     /// The shell's short name — `zsh`, `bash`, `fish`. Part of the key the
     /// command history matches on, since what follows a command depends on
     /// which shell is interpreting it.
-    var shellName: String {
-        (TerminalSession.resolvedShell() as NSString).lastPathComponent
-    }
+    var shellName: String { cachedShellName }
+    /// Resolving the shell checks the filesystem, and suggestions ask for the
+    /// name after every batch of output. Settled once `start` has run.
+    private lazy var cachedShellName = (TerminalSession.resolvedShell() as NSString).lastPathComponent
 
     private(set) var workingDirectory: String
 
@@ -64,7 +61,22 @@ final class TerminalSession: NSObject {
     static var debugRawOutput: (([UInt8]) -> Void)?
 
     /// Bytes read from the pty that the emulator has not consumed yet.
+    /// Appended to by the reader, under `pendingLock`.
     private var pendingOutput: [UInt8] = []
+    /// Set by the reader when it had to throw backlog away, so the drain can
+    /// cancel whatever escape sequence the cut left half-read.
+    private var droppedOutput = false
+    /// Set, under the lock, when the display link has been paused for want of
+    /// output; the reader clears it and wakes the link.
+    private var linkPaused = false
+    /// What the main thread took from `pendingOutput` and has not fed yet.
+    /// Swapped rather than copied out, so a large backlog is never shifted
+    /// down a byte array under the lock the reader needs.
+    private var drainBuffer: [UInt8] = []
+    private var drainOffset = 0
+    /// When the program opened a synchronized update (DECSET 2026) that is
+    /// still holding the screen, if one is.
+    private var synchronizedUpdateSince: CFTimeInterval?
     /// Prompt row of the last command we notified about, so a redrawn prompt
     /// or a second D mark cannot fire twice for one command.
     private var lastNotifiedCommand: Int?
@@ -73,9 +85,18 @@ final class TerminalSession: NSObject {
     private weak var view: TerminalView?
     private var displayLink: CADisplayLink?
 
-    /// How many bytes to emulate per frame. High enough that bulk output is
-    /// fast, low enough that the UI never stops responding.
-    private let bytesPerFrame = 512 * 1024
+    /// How long one frame may spend emulating. A byte count cannot bound this:
+    /// the same half megabyte is milliseconds of plain text and far longer of
+    /// dense CJK or colour escapes, on a phone several times slower still.
+    private let emulationBudget: CFTimeInterval = 0.008
+    /// Output is fed in slices this size, so the budget is checked often.
+    private let feedSlice = 32 * 1024
+    /// Longest a synchronized update may hold the screen. A program that
+    /// opens one and never closes it must not freeze the terminal.
+    private let synchronizedUpdateLimit: CFTimeInterval = 0.15
+    /// Whether the running blink timer was started for a blinking cursor, so
+    /// a program switching to a steady one (DECSCUSR) is noticed.
+    private var blinkTimerMode: Bool?
 
     private var cursorBlinkTimer: Timer?
 
@@ -128,18 +149,12 @@ final class TerminalSession: NSObject {
     /// have been. Nothing here is a live session: the marker line says so,
     /// because silently presenting dead output as a running terminal is how
     /// someone ends up waiting on a build that stopped existing hours ago.
-    func restore(from snapshot: SessionSnapshot, includeScreen: Bool = true) {
+    func restore(from snapshot: SessionSnapshot) {
         let restoredDirectory = UserEnvironment.logicalPath(snapshot.workingDirectory)
-        if isDirectory(restoredDirectory) {
+        if TerminalSession.isDirectory(restoredDirectory) {
             workingDirectory = restoredDirectory
         }
         if !snapshot.title.isEmpty { emulator.title = snapshot.title }
-        if snapshot.daemonSessionID != 0 { daemonSessionID = snapshot.daemonSessionID }
-
-        // Reattaching a live session: the daemon replays its own buffer, which
-        // is the authoritative live screen, so the saved (older) one is
-        // skipped to avoid drawing it twice.
-        guard includeScreen else { return }
 
         // Reconstruct each line at the width its own content needs, not at
         // `emulator.cols`: restore runs during `addTab`, before layout has
@@ -157,7 +172,7 @@ final class TerminalSession: NSObject {
         emulator.markAll()
     }
 
-    private func isDirectory(_ path: String) -> Bool {
+    private static func isDirectory(_ path: String) -> Bool {
         var isDir: ObjCBool = false
         return !path.isEmpty
             && FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
@@ -194,32 +209,15 @@ final class TerminalSession: NSObject {
 
     // MARK: - Starting
 
-    /// Chooses how this session reaches its shell: the daemon when it is
-    /// enabled and reachable (so the shell survives the app), otherwise a
-    /// local pty. Falls back silently, so the terminal always works.
-    private func makeTransport() -> SessionTransport {
-        if Preferences.shared.tmuxSessions, TmuxEnvironment.isInstalled {
-            // The session id is what makes a tab rejoin its own shell rather
-            // than someone else's: it is random per new session, carried
-            // forward in the snapshot, and so names the same tmux window
-            // across a restart.
-            return TmuxTransport(windowName: "dt-\(daemonSessionID)")
-        }
-        if Preferences.shared.persistentSessions,
-           DaemonSessionManager.shared.isAvailable {
-            return DaemonTransport(sessionID: daemonSessionID)
-        }
-        return Pty()
-    }
-
     func start() {
         guard !isRunning else { return }
 
         let shell = TerminalSession.resolvedShell()
         defaultTitle = (shell as NSString).lastPathComponent
+        cachedShellName = defaultTitle
 
-        var arguments = [Preferences.shared.loginShell ? "-\((shell as NSString).lastPathComponent)" : shell]
-        if !Preferences.shared.loginShell { arguments = [shell] }
+        // A login shell is started as `-zsh`: the dash is how it knows.
+        let arguments = [Preferences.shared.loginShell ? "-\(defaultTitle)" : shell]
 
         var env = TerminalSession.environment()
         // Hand the shell the *logical* working directory as `$PWD`. The kernel
@@ -228,50 +226,44 @@ final class TerminalSession: NSObject {
         // `%~` condenses `~` instead of the full `/private/preboot/...` path.
         env["PWD"] = workingDirectory
 
-        func attempt(_ candidate: SessionTransport) -> Bool {
-            transport = candidate
-            installTransportHandlers()
-            do {
-                try candidate.start(executable: shell, arguments: arguments, environment: env,
-                                    workingDirectory: workingDirectory,
-                                    cols: emulator.cols, rows: emulator.rows)
-                isRunning = true
-                pushWindowSize()
-                runStartupCommandIfNeeded()
-                return true
-            } catch { lastStartError = error; return false }
+        installPtyHandlers()
+        do {
+            try pty.start(executable: shell, arguments: arguments, environment: env,
+                          workingDirectory: workingDirectory,
+                          cols: emulator.cols, rows: emulator.rows)
+        } catch {
+            delegate?.session(self, didFailToStart: error)
+            showStartupFailure(error)
+            return
         }
-
-        if attempt(makeTransport()) { return }
-        // The daemon or tmux path failed — fall back to a local shell so the
-        // terminal still works. The only cost is that this session will not
-        // survive the app being killed. A terminal that will not open is a
-        // worse outcome than one whose shells are not persistent.
-        if transport is DaemonTransport || transport is TmuxTransport, attempt(Pty()) { return }
-
-        let error = lastStartError ?? PtyError.spawnFailed(0)
-        delegate?.session(self, didFailToStart: error)
-        showStartupFailure(error)
+        isRunning = true
+        pushWindowSize()
+        runStartupCommandIfNeeded()
     }
 
-    private var lastStartError: Error?
-
-    /// Wires the current transport's output and exit back into the session.
-    /// Re-run when the transport changes (a daemon-to-local fallback).
-    private func installTransportHandlers() {
-        transport.onRead = { [weak self] chunk in
+    /// Wires the pty's output and exit back into the session. Re-run for the
+    /// fresh `Pty` a restart makes.
+    private func installPtyHandlers() {
+        pty.onRead = { [weak self] chunk in
             guard let self else { return }
             TerminalSession.debugRawOutput?(chunk)
             self.pendingLock.lock()
-            // A runaway program can outrun the emulator; drop the oldest
-            // backlog rather than growing without bound.
+            // A runaway program can outrun the emulator; drop the backlog
+            // rather than growing without bound. What survives is the newest
+            // output, which is what the screen should end up showing.
             if self.pendingOutput.count > 16 << 20 {
-                self.pendingOutput.removeFirst(self.pendingOutput.count / 2)
+                self.pendingOutput.removeAll(keepingCapacity: true)
+                self.droppedOutput = true
             }
             self.pendingOutput.append(contentsOf: chunk)
+            let wake = self.linkPaused
+            self.linkPaused = false
             self.pendingLock.unlock()
+            if wake {
+                DispatchQueue.main.async { [weak self] in self?.displayLink?.isPaused = false }
+            }
         }
-        transport.onExit = { [weak self] code in
+        pty.onExit = { [weak self] code in
             guard let self else { return }
             self.isRunning = false
             self.exitCode = code
@@ -299,21 +291,7 @@ final class TerminalSession: NSObject {
 
     func stop() {
         guard isRunning else { return }
-        transport.terminate()
-    }
-
-    /// The app is going away, but this session should live on. A daemon or
-    /// tmux session is detached, so the shell keeps running in something that
-    /// is not our child; a local one has nothing to keep and simply ends with
-    /// the app.
-    ///
-    /// The tmux client would die with the app anyway, but closing it here is
-    /// the difference between leaving deliberately and being killed — and it
-    /// is the line that would have to change if the client ever stops being a
-    /// child process.
-    func detachKeepingAlive() {
-        (transport as? DaemonTransport)?.detach()
-        (transport as? TmuxTransport)?.detach()
+        pty.terminate()
     }
 
     /// Starts a fresh shell in place of one that has exited. A `Pty` owns a
@@ -321,14 +299,17 @@ final class TerminalSession: NSObject {
     /// than trying to revive the old.
     func restart() {
         guard !isRunning else { return }
-        transport.onRead = nil
-        transport.onExit = nil
-        transport = makeTransport()
+        pty.onRead = nil
+        pty.onExit = nil
+        pty = Pty()
         exitCode = nil
         cachedForegroundName = nil
         pendingLock.lock()
         pendingOutput.removeAll(keepingCapacity: true)
+        droppedOutput = false
         pendingLock.unlock()
+        drainBuffer.removeAll(keepingCapacity: true)
+        drainOffset = 0
         workingDirectory = inheritedDirectory ?? TerminalSession.resolvedStartDirectory()
         start()
     }
@@ -336,22 +317,57 @@ final class TerminalSession: NSObject {
     // MARK: - Output pump
 
     private func drainPendingOutput(all: Bool = false) {
-        pendingLock.lock()
-        if pendingOutput.isEmpty {
-            pendingLock.unlock()
-            return
+        let started = CACurrentMediaTime()
+        var fed = false
+
+        while true {
+            if drainOffset >= drainBuffer.count {
+                // Everything taken so far is fed; take what arrived since.
+                drainBuffer.removeAll(keepingCapacity: true)
+                drainOffset = 0
+                pendingLock.lock()
+                swap(&pendingOutput, &drainBuffer)
+                let dropped = droppedOutput
+                droppedOutput = false
+                if drainBuffer.isEmpty, !all, synchronizedUpdateSince == nil {
+                    // Nothing to do until the reader wakes the link again.
+                    linkPaused = true
+                    displayLink?.isPaused = true
+                }
+                pendingLock.unlock()
+                // CAN abandons any sequence the dropped bytes cut in half, so
+                // it cannot swallow the text that follows.
+                if dropped { emulator.feed([0x18]) }
+                if drainBuffer.isEmpty { break }
+            }
+            let end = all ? drainBuffer.count : min(drainBuffer.count, drainOffset + feedSlice)
+            drainBuffer.withUnsafeBufferPointer { buffer in
+                emulator.feed(UnsafeBufferPointer(rebasing: buffer[drainOffset..<end]))
+            }
+            drainOffset = end
+            fed = true
+            if !all, CACurrentMediaTime() - started > emulationBudget { break }
         }
-        let take = all ? pendingOutput.count : min(pendingOutput.count, bytesPerFrame)
-        let chunk = Array(pendingOutput[0..<take])
-        pendingOutput.removeFirst(take)
-        pendingLock.unlock()
 
-        emulator.feed(chunk)
+        guard fed || synchronizedUpdateSince != nil else { return }
 
-        refreshForegroundName()
-        delegate?.sessionDidProduceOutput(self)
+        if fed {
+            refreshForegroundName()
+            delegate?.sessionDidProduceOutput(self)
+        }
 
         guard let view else { return }
+
+        // Synchronized output (DECSET 2026): the program is drawing a frame
+        // and asked for it to appear all at once. Keep the damage and hold
+        // the screen until it says it is done, or the limit runs out.
+        let now = CACurrentMediaTime()
+        if emulator.modes.synchronizedUpdate, !all {
+            let since = synchronizedUpdateSince ?? now
+            synchronizedUpdateSince = since
+            if now - since < synchronizedUpdateLimit { return }
+        }
+        synchronizedUpdateSince = nil
 
         if emulator.allDirty {
             view.setNeedsDisplay()
@@ -367,7 +383,7 @@ final class TerminalSession: NSObject {
 
         // Any output means the cursor should be solid again — blinking that
         // starts mid-keystroke reads as lag.
-        restartCursorBlink()
+        if fed { holdCursorSolid() }
     }
 
     private var lastForegroundCheck = Date.distantPast
@@ -376,7 +392,7 @@ final class TerminalSession: NSObject {
         // second is plenty for a tab title.
         guard Date().timeIntervalSince(lastForegroundCheck) > 0.5 else { return }
         lastForegroundCheck = Date()
-        let name = transport.foregroundProcessName()
+        let name = pty.foregroundProcessName()
         if name != cachedForegroundName {
             cachedForegroundName = name
             delegate?.sessionDidUpdateTitle(self)
@@ -387,7 +403,7 @@ final class TerminalSession: NSObject {
 
     func send(bytes: [UInt8]) {
         guard isRunning, !bytes.isEmpty else { return }
-        transport.write(bytes)
+        pty.write(bytes)
     }
 
     func send(text: String) {
@@ -399,7 +415,7 @@ final class TerminalSession: NSObject {
     }
 
     func sendSignal(_ signal: Int32) {
-        transport.sendSignal(signal)
+        pty.sendSignal(signal)
     }
 
     // MARK: - Geometry
@@ -413,12 +429,12 @@ final class TerminalSession: NSObject {
             emulator.resize(cols: cols, rows: rows)
             view?.setNeedsDisplay()
         }
-        transport.resize(cols: cols, rows: rows,
+        pty.resize(cols: cols, rows: rows,
                    pixelWidth: Int(pixelWidth), pixelHeight: Int(pixelHeight))
     }
 
     private func pushWindowSize() {
-        transport.resize(cols: emulator.cols, rows: emulator.rows,
+        pty.resize(cols: emulator.cols, rows: emulator.rows,
                    pixelWidth: Int(emulator.reportedPixelWidth),
                    pixelHeight: Int(emulator.reportedPixelHeight))
     }
@@ -427,7 +443,9 @@ final class TerminalSession: NSObject {
 
     func restartCursorBlink() {
         cursorBlinkTimer?.invalidate()
+        cursorBlinkTimer = nil
         view?.cursorBlinkOn = true
+        blinkTimerMode = emulator.modes.cursorBlink
         guard Preferences.shared.cursorBlink, emulator.modes.cursorBlink else { return }
         let timer = Timer.scheduledTimer(withTimeInterval: 0.53, repeats: true) { [weak self] _ in
             guard let self, let v = self.view else { return }
@@ -435,6 +453,18 @@ final class TerminalSession: NSObject {
         }
         RunLoop.main.add(timer, forMode: .common)
         cursorBlinkTimer = timer
+    }
+
+    /// Shows the cursor and pushes the next blink back, without replacing the
+    /// timer — this runs for every frame of output, and a new timer (and a
+    /// preferences read) sixty times a second was work for nothing.
+    private func holdCursorSolid() {
+        guard blinkTimerMode == emulator.modes.cursorBlink else {
+            restartCursorBlink()
+            return
+        }
+        view?.cursorBlinkOn = true
+        cursorBlinkTimer?.fireDate = Date().addingTimeInterval(0.53)
     }
 
     // MARK: - Preferences applied at runtime
@@ -475,34 +505,26 @@ final class TerminalSession: NSObject {
     /// split from one whose directory has since been deleted falls back to the
     /// preference rather than failing to start a shell at all.
     static func usableDirectory(_ path: String?) -> String? {
-        guard let path, !path.isEmpty else { return nil }
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir),
-              isDir.boolValue else { return nil }
+        guard let path, isDirectory(path) else { return nil }
         return path
     }
 
     static func resolvedStartDirectory() -> String {
-        let fm = FileManager.default
-        func usable(_ p: String) -> Bool {
-            var isDir: ObjCBool = false
-            return fm.fileExists(atPath: p, isDirectory: &isDir) && isDir.boolValue
-        }
         let home = UserEnvironment.home
         switch Preferences.shared.startDirectory {
         case .deviceHome:
             let device = UserEnvironment.deviceHome
-            return usable(device) ? device : (usable(home) ? home : "/")
+            return isDirectory(device) ? device : (isDirectory(home) ? home : "/")
         case .home:
-            return usable(home) ? home : "/"
+            return isDirectory(home) ? home : "/"
         case .root:
             return "/"
         case .lastUsed:
             let last = Preferences.shared.lastWorkingDirectory
-            return usable(last) ? last : home
+            return isDirectory(last) ? last : home
         case .custom:
             let custom = Preferences.shared.customStartDirectory
-            return usable(custom) ? custom : home
+            return isDirectory(custom) ? custom : home
         }
     }
 
@@ -577,9 +599,7 @@ final class TerminalSession: NSObject {
     /// The `helpers` directory inside the app bundle, if it was built.
     private static func helperDirectory() -> String? {
         let path = Bundle.main.bundlePath + "/helpers"
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir),
-              isDir.boolValue else { return nil }
+        guard isDirectory(path) else { return nil }
         return path
     }
 }
@@ -623,10 +643,6 @@ extension TerminalSession: EmulatorDelegate {
             userInfo: ["title": title, "body": body])
     }
 
-    func emulator(_ emulator: Emulator, didScrollBy lines: Int) {
-        // Handled by the controller through didProduceOutputWhileScrolled.
-    }
-
     func emulatorPaletteDidChange(_ emulator: Emulator) {
         delegate?.sessionPaletteDidChange(self)
     }
@@ -641,22 +657,27 @@ extension TerminalSession: EmulatorDelegate {
               block.finishedAt != nil,
               block.promptStart != lastNotifiedCommand else { return }
         lastNotifiedCommand = block.promptStart
+        let command = commandText(for: block).map { text in
+            var text = text
+            // Cap the text because a notification is not a transcript.
+            if text.count > 60 { text = String(text.prefix(59)) + "…" }
+            return text
+        }
         CommandNotifier.commandFinished(block,
-                                        command: commandText(for: block),
+                                        command: command,
                                         title: displayTitle)
     }
 
     /// The command line the user typed, read back off the grid between the
     /// `B` and `C` marks. It comes from parsed cells, so it holds no control
-    /// bytes, and it is capped because a notification is not a transcript.
-    private func commandText(for block: CommandBlock) -> String? {
+    /// bytes.
+    func commandText(for block: CommandBlock) -> String? {
         guard let start = block.commandStart,
               let row = emulator.absoluteRow(for: start.row) else { return nil }
         let line = emulator.normal.row(at: row)
         guard start.col < line.count else { return nil }
-        var text = line.text(from: start.col, to: line.trimmedLength)
+        let text = line.text(from: start.col, to: line.trimmedLength)
             .trimmingCharacters(in: .whitespaces)
-        if text.count > 60 { text = String(text.prefix(59)) + "…" }
         return text.isEmpty ? nil : text
     }
 

@@ -21,7 +21,6 @@ PAYLOAD="$ROOT/packaging/payload"
 rm -rf "$PAYLOAD"
 mkdir -p "$PAYLOAD"
 cp -R "$ROOT/build/diffTerm.app" "$PAYLOAD/diffTerm.app"
-cp "$ROOT/Resources/LaunchDaemon/dev.diffterm.sessiond.plist" "$PAYLOAD/"
 printf '%s\n' "$VERSION" > "$PAYLOAD/PAYLOAD.version"
 
 echo "==> payload staged in packaging/payload/ ($(du -sh "$PAYLOAD" | cut -f1))"

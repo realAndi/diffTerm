@@ -34,9 +34,6 @@ enum CommandNotifier {
     /// still looking at the screen when they finished.
     private static let minimumDuration: TimeInterval = 10
 
-    private static var authorizationRequested = false
-    private static var authorized = false
-
     /// Called when a command finishes. Does nothing unless the app is in the
     /// background, the command ran long enough, and the user has not turned
     /// this off.
@@ -45,23 +42,30 @@ enum CommandNotifier {
         guard UIApplication.shared.applicationState != .active else { return }
         guard let duration = block.duration, duration >= minimumDuration else { return }
 
-        requestAuthorizationIfNeeded { granted in
+        ensureAuthorization { granted in
             guard granted else { return }
             post(block, command: command, title: title, duration: duration)
         }
     }
 
-    private static func requestAuthorizationIfNeeded(_ completion: @escaping (Bool) -> Void) {
-        if authorizationRequested {
-            completion(authorized)
-            return
-        }
-        authorizationRequested = true
-        UNUserNotificationCenter.current()
-            .requestAuthorization(options: [.alert, .sound]) { granted, _ in
-                authorized = granted
+    /// Authorisation is deliberately not cached: the user can flip the switch
+    /// in Settings while we run, and a cached answer would go stale in either
+    /// direction. This path is rare — a long command finishing in the
+    /// background — so re-asking the system each time is cheap. An observer on
+    /// didBecomeActive would be more machinery for the same freshness.
+    private static func ensureAuthorization(_ completion: @escaping (Bool) -> Void) {
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            guard settings.authorizationStatus == .notDetermined else {
+                completion(settings.authorizationStatus == .authorized)
+                return
+            }
+            // First ever use: prompt. Later calls take the branch above, so
+            // this never asks twice.
+            center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
                 completion(granted)
             }
+        }
     }
 
     private static func post(_ block: CommandBlock, command: String?,

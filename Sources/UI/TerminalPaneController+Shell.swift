@@ -152,13 +152,7 @@ extension TerminalPaneController {
     /// The command line as typed, read back off the grid between the B and C
     /// marks — the same trick the finished-command notification uses.
     func commandText(for block: CommandBlock) -> String? {
-        guard let start = block.commandStart,
-              let row = session.emulator.absoluteRow(for: start.row) else { return nil }
-        let line = session.emulator.normal.row(at: row)
-        guard start.col < line.count else { return nil }
-        let text = line.text(from: start.col, to: line.trimmedLength)
-            .trimmingCharacters(in: .whitespaces)
-        return text.isEmpty ? nil : text
+        return session.commandText(for: block)
     }
 
     private func blockMenuTitle(for block: CommandBlock) -> String {

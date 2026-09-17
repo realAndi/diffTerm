@@ -77,6 +77,17 @@ struct NextCommandPredictor {
     func predict(_ context: Context) -> Prediction? {
         let prefix = context.prefix
 
+        // The steps overlap: everything step 2 turns down comes round again
+        // in step 3, and an episode's follow-up is usually in both. Validating
+        // touches the filesystem, so each candidate is judged once per call.
+        var verdicts: [String: Bool] = [:]
+        func accepts(_ candidate: String) -> Bool {
+            if let known = verdicts[candidate] { return known }
+            let verdict = !ignored.contains(candidate) && validator.isValid(candidate, cwd: context.pwd)
+            verdicts[candidate] = verdict
+            return verdict
+        }
+
         // 1. What followed this command last time it ended this way, here.
         if let last = context.lastCommand, !last.isEmpty {
             let episodes = store.episodes(after: last,
@@ -84,22 +95,20 @@ struct NextCommandPredictor {
                                           exitCode: context.lastExitCode,
                                           shell: context.shell,
                                           hostname: context.hostname)
-            if let hit = shortcut(episodes: episodes, prefix: prefix, cwd: context.pwd) { return hit }
+            if let hit = shortcut(episodes: episodes, prefix: prefix, accepts: accepts) { return hit }
         }
 
         guard !prefix.isEmpty else { return nil }
 
         // 2. The most recent thing you ran that starts this way, this
         //    directory first.
-        for candidate in store.recent(matching: prefix, pwd: context.pwd) {
-            guard !ignored.contains(candidate), validator.isValid(candidate, cwd: context.pwd) else { continue }
+        for candidate in store.recent(matching: prefix, pwd: context.pwd) where accepts(candidate) {
             return Prediction(command: candidate, source: .history)
         }
 
         // 3. Anywhere in history.
-        for candidate in store.allCommands() {
-            guard candidate.hasPrefix(prefix), candidate != prefix,
-                  !ignored.contains(candidate), validator.isValid(candidate, cwd: context.pwd) else { continue }
+        for candidate in store.allCommands()
+        where candidate.hasPrefix(prefix) && candidate != prefix && accepts(candidate) {
             return Prediction(command: candidate, source: .history)
         }
 
@@ -120,7 +129,8 @@ struct NextCommandPredictor {
     /// well as the running: if two of three past runs were followed by a
     /// command whose file no longer exists, the remaining one should be judged
     /// on its own, not scored 1/3.
-    private func shortcut(episodes: [CommandEpisode], prefix: String, cwd: String) -> Prediction? {
+    private func shortcut(episodes: [CommandEpisode], prefix: String,
+                          accepts: (String) -> Bool) -> Prediction? {
         var pool = episodes
         if !prefix.isEmpty {
             pool = pool.filter { $0.next.hasPrefix(prefix) && $0.next != prefix }
@@ -139,7 +149,7 @@ struct NextCommandPredictor {
         let ranked = counts.sorted { ($0.value, $1.key) > ($1.value, $0.key) }.prefix(5)
 
         for (candidate, count) in ranked {
-            if ignored.contains(candidate) || !validator.isValid(candidate, cwd: cwd) {
+            if !accepts(candidate) {
                 total -= count
                 continue
             }
@@ -275,12 +285,47 @@ struct CommandValidator: CommandValidating {
         if CommandValidator.builtins.contains(word) { return true }
         // A path was written out in full; it either exists or it does not.
         if word.contains("/") { return fileManager.isExecutableFile(atPath: resolve(word, cwd: "/")) }
-        for directory in CommandValidator.searchPaths
-        where fileManager.isExecutableFile(atPath: directory + "/" + word) {
-            return true
+        return CommandValidator.lookups.resolves(word) {
+            CommandValidator.searchPaths.contains { fileManager.isExecutableFile(atPath: $0 + "/" + word) }
         }
-        return false
     }
+
+    /// Answers to "is this name on PATH?", kept across calls.
+    ///
+    /// A miss stats every directory on PATH, and the same few command names
+    /// are asked about on every keystroke. `PathCompleter` holds the set of
+    /// names already, but only answers prefix queries, so this keeps its own
+    /// answers on the same terms: a found name is trusted for as long as the
+    /// completer trusts its listing. A missing one is looked for again much
+    /// sooner, so a tool installed a moment ago is not turned down for
+    /// minutes.
+    private final class Lookups {
+        private var answers: [String: (found: Bool, at: Date)] = [:]
+        private let lock = NSLock()
+        private let foundLifetime: TimeInterval = 300
+        private let missingLifetime: TimeInterval = 10
+
+        func resolves(_ word: String, lookUp: () -> Bool) -> Bool {
+            let now = Date()
+            lock.lock()
+            if let answer = answers[word],
+               now.timeIntervalSince(answer.at) < (answer.found ? foundLifetime : missingLifetime) {
+                lock.unlock()
+                return answer.found
+            }
+            lock.unlock()
+
+            let found = lookUp()
+            lock.lock()
+            // History draws on a few hundred names at most; this is a guard
+            // against something pathological, not an eviction policy.
+            if answers.count > 1024 { answers.removeAll() }
+            answers[word] = (found, now)
+            lock.unlock()
+            return found
+        }
+    }
+    private static let lookups = Lookups()
 
     /// Only arguments that are unambiguously paths. A bare word like `main`
     /// is a branch far more often than a missing file, and rejecting those

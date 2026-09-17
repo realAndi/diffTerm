@@ -13,14 +13,11 @@ struct SessionSnapshot: Codable {
     var workingDirectory: String
     var lines: [SnapshotLine]
     var savedAt: Date
-    /// The daemon session this tab was attached to, so a relaunch can reattach
-    /// to the still-running shell rather than restoring a dead screen. Zero
-    /// for a snapshot saved before the daemon existed, or a local session.
-    var daemonSessionID: UInt32 = 0
 
+    /// Older builds also wrote a `d` key. The synthesised decoder skips keys
+    /// it does not list, so their snapshots still load.
     enum CodingKeys: String, CodingKey {
         case title, workingDirectory, lines, savedAt
-        case daemonSessionID = "d"
     }
 
     /// Kept deliberately small. This is the tail you would scroll back through,

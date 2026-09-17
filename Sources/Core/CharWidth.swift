@@ -83,6 +83,12 @@ enum CharWidth {
 
     static func width(of scalar: Unicode.Scalar) -> Int {
         let v = scalar.value
+        // Printable ASCII and Latin-1 through Latin Extended/IPA/spacing
+        // modifiers: one column, no property lookup. U+00AD is the only
+        // format character below U+0300 and is drawn anyway; nothing here
+        // has emoji presentation. This skips two Unicode table searches for
+        // nearly every character a terminal prints.
+        if (v >= 0x20 && v < 0x7F) || (v >= 0xA0 && v < 0x300) { return 1 }
         if v == 0 { return 0 }
         if v < 0x20 || (v >= 0x7F && v < 0xA0) { return 0 }
         // Combining marks and other zero-width classes.
@@ -106,6 +112,80 @@ enum CharWidth {
         if scalar.properties.isEmojiPresentation { return 2 }
         return inWideRange(v) ? 2 : 1
     }
+
+    /// Width of a scalar from the ranges terminals print most after ASCII —
+    /// Latin, Greek and Cyrillic letters, punctuation, symbols, box drawing,
+    /// kana, CJK, Hangul syllables, private-use glyphs and emoji — or 0 for
+    /// any other scalar.
+    ///
+    /// Every scalar with a non-zero answer is also a guarantee about grapheme
+    /// clusters: its Grapheme_Cluster_Break class is Other, Control, LV or
+    /// LVT (never Extend, ZWJ, SpacingMark, Prepend, a regional indicator or
+    /// a Hangul jamo), so it cannot join into one cluster with printable
+    /// ASCII or with another scalar this returns non-zero for. Older rules
+    /// agree: the emoji classes of Unicode 9 and 10 only joined a skin-tone
+    /// modifier or what follows a ZWJ, and neither is accepted here. That is
+    /// what lets the parser skip String's segmentation for these without
+    /// changing where it breaks.
+    ///
+    /// The uniform ranges hold no marks, format characters or
+    /// emoji-presentation scalars, so their width is what `width(of:)` would
+    /// work out from the Unicode tables; the mixed ones look it up in
+    /// `mixedWidths`.
+    @inline(__always)
+    static func standaloneWidth(_ v: UInt32) -> Int {
+        if v < 0x2000 {
+            switch v {
+            case 0x00A0...0x02FF: return 1  // Latin-1 .. spacing modifiers
+            case 0x0370...0x0482,           // Greek, Cyrillic, minus the
+                 0x048A...0x052F:           // Cyrillic combining marks
+                return 1
+            case 0x1E00...0x1EFF: return 1  // Latin Extended Additional
+            default: return 0
+            }
+        }
+        if v < 0x3000 {
+            switch v {
+            case 0x2500...0x25FC: return 1  // box drawing, blocks, shapes
+            case 0x2010...0x2027,           // general punctuation, minus
+                 0x2030...0x205E:           // the format controls
+                return 1
+            case 0x2070...0x20CF: return 1  // super/subscripts, currency
+            case 0x2100...0x22FF: return 1  // letterlike, arrows, maths
+            case 0x2400...0x24FF: return 1  // control pictures, enclosed
+            case 0x2800...0x28FF: return 1  // braille
+            case 0x2300...0x23FF,           // technical symbols, dingbats:
+                 0x25FD...0x27BF:           // some have emoji presentation
+                return Int(mixedWidths[Int(v - 0x2300)])
+            default: return 0
+            }
+        }
+        switch v {
+        case 0x4E00...0x9FFF: return 2      // CJK Unified Ideographs
+        case 0x3041...0x3096,               // hiragana and katakana, minus
+             0x309B...0x30FF:               // the combining voicing marks
+            return 2
+        case 0x3000...0x3029: return 2      // CJK punctuation
+        case 0xAC00...0xD7A3: return 2      // Hangul syllables
+        case 0x3400...0x4DBF: return 2      // CJK Extension A
+        case 0xE000...0xF8FF: return 1      // private use: Powerline, Nerd Fonts
+        case 0xF900...0xFAFF: return 2      // CJK compatibility ideographs
+        case 0xFF01...0xFF60: return 2      // fullwidth forms
+        case 0x1F300...0x1F3FA,             // emoji, minus the skin-tone
+             0x1F400...0x1F6FF,             // modifiers, which extend the
+             0x1F900...0x1F9FF:             // emoji before them
+            return Int(mixedWidths[Int(v - 0x1F300) + 0x500])
+        default: return 0
+        }
+    }
+
+    /// `width(of:)` for U+2300–U+27FF, then U+1F300–U+1F9FF, worked out once.
+    /// Asking the Unicode tables costs two searches per character, where this
+    /// costs an index; the answers come from the same function, so they
+    /// cannot differ.
+    private static let mixedWidths: [UInt8] =
+        (UInt32(0x2300)...0x27FF).map { UInt8(width(of: Unicode.Scalar($0).unsafelyUnwrapped)) } +
+        (UInt32(0x1F300)...0x1F9FF).map { UInt8(width(of: Unicode.Scalar($0).unsafelyUnwrapped)) }
 
     /// Width of a full grapheme cluster: the base scalar decides, except that
     /// an emoji-presentation selector or a ZWJ sequence forces two columns.

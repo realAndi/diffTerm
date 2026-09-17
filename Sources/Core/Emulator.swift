@@ -48,8 +48,6 @@ protocol EmulatorDelegate: AnyObject {
     func emulator(_ emulator: Emulator, didSetWorkingDirectory path: String)
     func emulator(_ emulator: Emulator, didRequestClipboardWrite text: String)
     func emulator(_ emulator: Emulator, didPostNotification title: String, body: String)
-    /// Fired when scrollback gained lines, so the view can hold its position.
-    func emulator(_ emulator: Emulator, didScrollBy lines: Int)
     func emulatorPaletteDidChange(_ emulator: Emulator)
     /// A shell integration mark arrived: a command started, or finished.
     func emulatorShellIntegrationDidChange(_ emulator: Emulator)
@@ -97,8 +95,26 @@ final class Emulator: ParserDelegate {
     /// Rows touched since the last render pass, as absolute buffer indices.
     var dirtyRows = Set<Int>()
     var allDirty = true
+    /// The row `markDirtyRow` inserted last, so a run of prints on one row
+    /// costs one set insertion rather than one per character.
+    private var lastDirtyRow = -1
 
     var scrollbackLimit: Int
+
+    /// The cursor shape the user picked. A program that sets its own shape
+    /// wins until it asks for the default back (`CSI 0 q`) or the terminal is
+    /// reset — both of which mean this shape, not a hard-coded block.
+    var defaultCursorShape: CursorShape = .block {
+        didSet { if !cursorShapeSetByProgram { modes.cursorShape = defaultCursorShape } }
+    }
+    /// Whether the shape in `modes` came from DECSCUSR rather than the user.
+    var cursorShapeSetByProgram = false
+
+    /// Bumped by every reflow, with the stable-row mapping it used, so state
+    /// kept outside the emulator in stable rows (a collapsed block) can move
+    /// along with the text: compare the generation, then map through it.
+    private(set) var reflowGeneration = 0
+    private(set) var lastReflowMap: ((Int) -> Int)?
 
     /// Pixel size of one cell, pushed down by the view so that programs
     /// querying window geometry get truthful answers.
@@ -126,12 +142,6 @@ final class Emulator: ParserDelegate {
     var dcsBuffer: [UInt8] = []
     /// Whether the Sixel being read asked for unset pixels to be left alone.
     var sixelBackgroundTransparent = true
-
-    /// Set while the program has asked us to hold rendering (DECSET 2026).
-    var suppressRender: Bool { modes.synchronizedUpdate }
-
-    /// Suppresses redraw while a program brackets an update (DECSET 2026).
-    var deferredRenderDepth = 0
 
     init(cols: Int, rows: Int, scrollbackLimit: Int = 10_000) {
         self.scrollbackLimit = scrollbackLimit
@@ -191,11 +201,17 @@ final class Emulator: ParserDelegate {
 
     func markDirtyRow(_ row: Int) {
         guard !allDirty else { return }
-        dirtyRows.insert(buffer.scrollbackCount + row)
+        let absolute = buffer.scrollbackCount + row
+        // Printing marks the same row once per character; hashing into the
+        // set every time is wasted work after the first.
+        guard absolute != lastDirtyRow else { return }
+        lastDirtyRow = absolute
+        dirtyRows.insert(absolute)
     }
 
     func markAll() {
         allDirty = true
+        lastDirtyRow = -1
         dirtyRows.removeAll(keepingCapacity: true)
     }
 
@@ -206,6 +222,7 @@ final class Emulator: ParserDelegate {
 
     func clearDirty() {
         dirtyRows.removeAll(keepingCapacity: true)
+        lastDirtyRow = -1
         allDirty = false
     }
 
@@ -215,7 +232,39 @@ final class Emulator: ParserDelegate {
 
     func resize(cols: Int, rows: Int) {
         guard cols != self.cols || rows != self.rows else { return }
-        normal.resize(cols: cols, rows: rows, blank: currentBlank())
+
+        // A new width re-wraps the normal buffer, which moves text to other
+        // rows. The command marks and pictures anchored to that text have to
+        // move with it, and a command's start moves column as well as row.
+        let evictedBefore = normal.scrollbackEvicted
+        let starts = shellIntegration.blocks.compactMap { block -> Buffer.Position? in
+            guard let start = block.commandStart else { return nil }
+            return Buffer.Position(row: start.row - evictedBefore, col: start.col)
+        }
+        if let reflow = normal.resize(cols: cols, rows: rows, blank: currentBlank(), tracking: starts) {
+            let moved = reflow.rows
+            func stable(_ row: Int) -> Int {
+                let old = row - evictedBefore
+                guard old >= 0, !moved.isEmpty else { return row }
+                // A mark can sit one past the last row: D is recorded where
+                // the next prompt will go.
+                guard old < moved.count else { return evictedBefore + moved[moved.count - 1] + (old - moved.count + 1) }
+                return evictedBefore + moved[old]
+            }
+            var startsMoved: [Buffer.Position: Buffer.Position] = [:]
+            for (before, after) in zip(starts, reflow.positions) { startsMoved[before] = after }
+            shellIntegration.remap(row: stable) { row, col in
+                guard let after = startsMoved[Buffer.Position(row: row - evictedBefore, col: col)] else {
+                    return (stable(row), col)
+                }
+                return (evictedBefore + after.row, after.col)
+            }
+            images.remap(row: stable)
+            reflowGeneration += 1
+            lastReflowMap = stable
+            shellIntegration.discard(before: oldestStableRow)
+            images.discard(before: oldestStableRow)
+        }
         alternate.resize(cols: cols, rows: rows, blank: currentBlank())
         markAll()
     }
@@ -257,18 +306,169 @@ final class Emulator: ParserDelegate {
 
     // MARK: - ParserDelegate: printing
 
-    func parserPrint(_ ch: Character) {
-        var ch = ch
-        let set: CharacterSet94
-        if let ss = singleShift {
-            set = charsets[ss]
-            singleShift = nil
+    func parserPrintASCII(_ byte: UInt8) {
+        let set = activeCharsetForNextCharacter()
+        let ch = Emulator.asciiCharacters[Int(byte & 0x7F)]
+        if set.isPassthrough {
+            place(ch, width: 1)
         } else {
-            set = charsets[gl]
+            let translated = set.translate(ch)
+            place(translated, width: CharWidth.width(of: translated))
         }
-        if !set.isPassthrough { ch = set.translate(ch) }
+    }
 
-        let width = CharWidth.width(of: ch)
+    func parserPrintASCIIRun(_ run: UnsafeBufferPointer<UInt8>) {
+        // Charset translation, a single shift and insert mode each change
+        // what a character does; those take the per-character path.
+        guard singleShift == nil, charsets[gl].isPassthrough, !modes.insertMode else {
+            for byte in run { parserPrintASCII(byte) }
+            return
+        }
+        var cellAttrs = attrs
+        cellAttrs.linkID = currentLinkID
+        var i = 0
+        while i < run.count {
+            let x = buffer.cursorX, y = buffer.cursorY
+            // The last column is where autowrap is decided. A pending wrap,
+            // or a cursor already there, goes through `place` so that logic
+            // lives in one place; everything short of it is filled directly.
+            let room = buffer.cols - 1 - x
+            guard !buffer.wrapPending, room > 0, y < buffer.lines.count else {
+                parserPrintASCII(run[i])
+                i += 1
+                continue
+            }
+            let n = min(room, run.count - i)
+            buffer.lines[y].cells.withUnsafeMutableBufferPointer { cells in
+                for k in 0..<n {
+                    cells[x + k] = Cell(ch: Emulator.asciiCharacters[Int(run[i + k] & 0x7F)],
+                                        attrs: cellAttrs)
+                }
+            }
+            buffer.cursorX = x + n
+            markDirtyRow(y)
+            i += n
+        }
+    }
+
+    /// Building a `Character` from a byte goes through String's UTF-8
+    /// validation every time; the 128 possible results are made once.
+    private static let asciiCharacters: [Character] =
+        (0..<128).map { Character(Unicode.Scalar(UInt8($0))) }
+
+    func parserPrint(_ ch: Character) {
+        let set = activeCharsetForNextCharacter()
+        let ch = set.isPassthrough ? ch : set.translate(ch)
+        place(ch, width: CharWidth.width(of: ch))
+    }
+
+    func parserPrintScalar(_ scalar: Unicode.Scalar, width: Int) {
+        // The 94-character sets only translate ASCII, so there is nothing to
+        // look up, but a single shift is still used up by this character.
+        singleShift = nil
+        place(Character(scalar), width: width)
+    }
+
+    func parserPrintTextRun(_ run: UnsafeBufferPointer<UInt8>) {
+        // The same conditions as the ASCII run: anything that changes what a
+        // character does takes the per-character path.
+        guard singleShift == nil, charsets[gl].isPassthrough, !modes.insertMode else {
+            var i = 0
+            while i < run.count { i += printCharacter(in: run, at: i) }
+            return
+        }
+        var cellAttrs = attrs
+        cellAttrs.linkID = currentLinkID
+        var trailerAttrs = cellAttrs
+        trailerAttrs.flags.insert(.wideTrailer)
+        var i = 0
+        while i < run.count {
+            let x = buffer.cursorX, y = buffer.cursorY, cols = buffer.cols
+            // Characters that end short of the last column are filled
+            // directly; the one that would reach it, or any character while
+            // a wrap is pending, goes through `place`, as in the ASCII run.
+            if !buffer.wrapPending, y < buffer.lines.count {
+                var next = x
+                buffer.lines[y].cells.withUnsafeMutableBufferPointer { cells in
+                    while i < run.count {
+                        let byte = run[i]
+                        if byte < 0x80 {
+                            guard next + 1 < cols else { break }
+                            cells[next] = Cell(ch: Emulator.asciiCharacters[Int(byte)], attrs: cellAttrs)
+                            next += 1
+                            i += 1
+                        } else {
+                            let (value, length) = Parser.decodeUTF8Sequence(run, at: i)
+                            let width = CharWidth.standaloneWidth(value)
+                            guard next + width < cols else { break }
+                            cells[next] = Cell(ch: Character(Unicode.Scalar(value).unsafelyUnwrapped),
+                                               attrs: cellAttrs)
+                            if width == 2 { cells[next + 1] = Cell(ch: " ", attrs: trailerAttrs) }
+                            next += width
+                            i += length
+                        }
+                    }
+                }
+                if next != x {
+                    buffer.cursorX = next
+                    markDirtyRow(y)
+                }
+            }
+            if i < run.count { i += printCharacter(in: run, at: i) }
+        }
+    }
+
+    /// Prints the character of a text run that starts at `i` through the
+    /// per-character path, and returns how many bytes it took.
+    private func printCharacter(in run: UnsafeBufferPointer<UInt8>, at i: Int) -> Int {
+        let byte = run[i]
+        if byte < 0x80 {
+            parserPrintASCII(byte)
+            return 1
+        }
+        let (value, length) = Parser.decodeUTF8Sequence(run, at: i)
+        parserPrintScalar(Unicode.Scalar(value).unsafelyUnwrapped, width: CharWidth.standaloneWidth(value))
+        return length
+    }
+
+    /// GL's charset, unless SS2/SS3 picked one for exactly this character.
+    @inline(__always)
+    private func activeCharsetForNextCharacter() -> CharacterSet94 {
+        if let ss = singleShift {
+            singleShift = nil
+            return charsets[ss]
+        }
+        return charsets[gl]
+    }
+
+    /// The common case of `place`: a character that ends short of the last
+    /// column, with no wrap pending and insert mode off, needs none of its
+    /// edge handling. Reading each property once and writing the cells
+    /// through one buffer access, as the ASCII run does, saves most of the
+    /// exclusivity and uniqueness checks the full path pays for. Returns
+    /// false, having changed nothing, when the character needs all of it.
+    @inline(__always)
+    private func placeShortOfMargin(_ ch: Character, width: Int) -> Bool {
+        let x = buffer.cursorX, y = buffer.cursorY
+        guard width > 0, x + width < buffer.cols, !buffer.wrapPending, !modes.insertMode,
+              y < buffer.lines.count else { return false }
+        var cellAttrs = attrs
+        cellAttrs.linkID = currentLinkID
+        buffer.lines[y].cells.withUnsafeMutableBufferPointer { cells in
+            cells[x] = Cell(ch: ch, attrs: cellAttrs)
+            if width == 2 {
+                var trailer = cellAttrs
+                trailer.flags.insert(.wideTrailer)
+                cells[x + 1] = Cell(ch: " ", attrs: trailer)
+            }
+        }
+        buffer.cursorX = x + width
+        markDirtyRow(y)
+        return true
+    }
+
+    private func place(_ ch: Character, width: Int) {
+        if placeShortOfMargin(ch, width: width) { return }
 
         // A zero-width mark belongs to the previous cell, not a new one.
         if width == 0 {
@@ -287,7 +487,9 @@ final class Emulator: ParserDelegate {
         // rather than split across the edge.
         if width == 2 && buffer.cursorX == buffer.cols - 1 {
             if modes.autoWrap {
-                buffer.lines[buffer.cursorY][buffer.cursorX] = currentBlank()
+                var padding = currentBlank()
+                padding.attrs.flags.insert(.wrapPadding)
+                buffer.lines[buffer.cursorY][buffer.cursorX] = padding
                 buffer.lines[buffer.cursorY].wrapped = true
                 markDirtyRow(buffer.cursorY)
                 lineFeed(resetColumn: true, isWrap: true)
@@ -395,10 +597,7 @@ final class Emulator: ParserDelegate {
         if resetColumn { buffer.cursorX = 0 }
         buffer.wrapPending = false
         if buffer.cursorY == buffer.scrollBottom {
-            let before = buffer.scrollbackCount
             buffer.scrollUp(1, blank: currentBlank())
-            let gained = buffer.scrollbackCount - before
-            if gained > 0 { delegate?.emulator(self, didScrollBy: gained) }
             markAll()
         } else if buffer.cursorY < buffer.rows - 1 {
             buffer.cursorY += 1

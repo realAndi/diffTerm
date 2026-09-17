@@ -30,11 +30,11 @@ enum UserEnvironment {
     static var entry: Entry { cached }
     static var home: String { cached.home }
 
-    /// The folder the app keeps its state in: history, sessions, the daemon
-    /// socket. Named after the bundle rather than hard-coded, so a second
-    /// build installed alongside the first keeps its own state instead of
-    /// writing over the first's. Falls back to the product name outside an
-    /// app bundle, which is where the test harness runs.
+    /// The folder the app keeps its state in: history and saved sessions.
+    /// Named after the bundle rather than hard-coded, so a second build
+    /// installed alongside the first keeps its own state instead of writing
+    /// over the first's. Falls back to the product name outside an app
+    /// bundle, which is where the test harness runs.
     static var supportFolderName: String {
         (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String) ?? "diffTerm"
     }

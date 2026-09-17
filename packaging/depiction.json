@@ -16,7 +16,7 @@
         { "class": "DepictionSeparatorView" },
         {
           "class": "DepictionSubheaderView",
-          "title": "Your shells outlive the app",
+          "title": "Your screen comes back",
           "useBoldText": true,
           "useBottomMargin": true
         },
@@ -24,7 +24,7 @@
           "class": "DepictionMarkdownView",
           "useSpacing": true,
           "useRawFormat": false,
-          "markdown": "Shells are owned by `sessiond`, a daemon launchd keeps alive outside the app. Background diffTerm mid-build, lock the phone, even force-quit: the shell keeps running. Reopen the tab and it reattaches, replaying everything you missed."
+          "markdown": "When iOS reclaims diffTerm in the background, each tab's screen is saved on the way out and put back the next time you open it, under a line saying the earlier processes are gone, so old output is never mistaken for a live shell."
         },
         { "class": "DepictionSeparatorView" },
         {
@@ -92,7 +92,7 @@
           "class": "DepictionMarkdownView",
           "useSpacing": true,
           "useRawFormat": false,
-          "markdown": "**Persistence.** `sessiond` starts at install and keeps running across app launches. Closing a tab kills that tab's shell, as you would expect; backgrounding the app kills nothing."
+          "markdown": "**Sessions.** Shells run inside the app and end with it: closing a tab stops its shell, and so does iOS reclaiming the app."
         },
         { "class": "DepictionSeparatorView" },
         {

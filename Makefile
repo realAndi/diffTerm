@@ -13,7 +13,7 @@ SHELL        := $(if $(wildcard /var/jb/bin/sh),/var/jb/bin/sh,/bin/sh)
 APP_NAME     ?= diffTerm
 BUNDLE_ID    ?= dev.diffterm.app
 DISPLAY_NAME ?= $(APP_NAME)
-VERSION      ?= 2.1
+VERSION      ?= 2.2
 
 # Only the primary install owns the pbcopy/pbpaste links.
 PRIMARY_ID   := dev.diffterm.app
@@ -61,14 +61,6 @@ HELPER_SRC   := Sources/Helpers/dtclip.c
 HELPER_DIR   := $(APP)/helpers
 HELPERS      := $(HELPER_DIR)/pbcopy $(HELPER_DIR)/pbpaste
 
-# The session daemon: launchd starts it, so shells it owns outlive the app
-# being backgrounded or killed. Built into the bundle; a LaunchDaemon plist
-# points here. See Sources/Daemon/sessiond.c.
-SESSIOND_SRC := Sources/Daemon/sessiond.c
-SESSIOND     := $(APP)/sessiond
-DAEMON_PLIST := Resources/LaunchDaemon/dev.diffterm.sessiond.plist
-DAEMON_DEST  := /var/jb/Library/LaunchDaemons/dev.diffterm.sessiond.plist
-
 ICONS        := $(wildcard Resources/Icons/*.png)
 FONTS        := $(wildcard Resources/Fonts/*.ttf)
 # Shell integration. Without these the OSC 133 marks never arrive, and blocks
@@ -98,7 +90,7 @@ CFLAGS       := -isysroot $(SDK) -target $(TARGET) -O2 -Wall -Wextra
 LDID         := ldid
 
 .PHONY: all clean install uninstall reinstall run package check test icons \
-        link-helpers unlink-helpers load-daemon unload-daemon
+        link-helpers unlink-helpers
 
 all: $(BINARY)
 
@@ -112,12 +104,6 @@ $(HELPERS): $(HELPER_SRC) Makefile
 	@$(LDID) -S $(HELPER_DIR)/pbcopy
 	@$(LDID) -S $(HELPER_DIR)/pbpaste
 
-$(SESSIOND): $(SESSIOND_SRC) $(C_SRC) Sources/CBridge/DTPty.h Makefile
-	@echo "  CC    $(SESSIOND_SRC) -> sessiond"
-	@mkdir -p $(APP)
-	@clang $(CFLAGS) $(SESSIOND_SRC) $(C_SRC) -o $(SESSIOND)
-	@$(LDID) -S $(SESSIOND)
-
 $(OBJ):
 	@mkdir -p $(OBJ)
 
@@ -125,7 +111,7 @@ $(C_OBJ): $(C_SRC) Sources/CBridge/DTPty.h | $(OBJ)
 	@echo "  CC    $<"
 	@clang $(CFLAGS) -c $< -o $@
 
-$(BINARY): $(SWIFT_SRC) $(C_OBJ) $(BRIDGE) Resources/Info.plist Resources/Entitlements.plist $(ICONS) $(FONTS) $(SHELL_INT) $(SPECS) $(HELPERS) $(SESSIOND) Makefile
+$(BINARY): $(SWIFT_SRC) $(C_OBJ) $(BRIDGE) Resources/Info.plist Resources/Entitlements.plist $(ICONS) $(FONTS) $(SHELL_INT) $(SPECS) $(HELPERS) Makefile
 	@echo "  SWIFT $(words $(SWIFT_SRC)) files"
 	@mkdir -p $(APP)
 	@swiftc $(SWIFT_FLAGS) -o $(BINARY) $(SWIFT_SRC)
@@ -228,21 +214,6 @@ unlink-helpers:
 	  esac; \
 	done
 
-# Installs and starts the session daemon under launchd, so shells survive the
-# app. Safe to run repeatedly.
-load-daemon:
-	@echo "  DAEMON $(DAEMON_DEST)"
-	@$(SUDO) cp $(DAEMON_PLIST) $(DAEMON_DEST)
-	@$(SUDO) chown root:wheel $(DAEMON_DEST)
-	@$(SUDO) chmod 644 $(DAEMON_DEST)
-	@$(SUDO) launchctl bootstrap system $(DAEMON_DEST) 2>/dev/null || $(SUDO) launchctl load $(DAEMON_DEST)
-	@echo "  ==> sessiond loaded"
-
-unload-daemon:
-	@$(SUDO) launchctl bootout system $(DAEMON_DEST) 2>/dev/null || $(SUDO) launchctl unload $(DAEMON_DEST) 2>/dev/null || true
-	@$(SUDO) rm -f $(DAEMON_DEST)
-	@echo "  ==> sessiond unloaded"
-
 uninstall: unlink-helpers
 	@$(SUDO) uicache -u $(INSTALLED) || true
 	@$(SUDO) rm -rf $(INSTALLED)
@@ -256,19 +227,16 @@ run: install
 package: $(BINARY)
 	@echo "  DEB   $(BUILD)/$(APP_NAME)_$(VERSION).deb"
 	@rm -rf $(BUILD)/deb
-	@mkdir -p $(BUILD)/deb/DEBIAN $(BUILD)/deb/var/jb/Applications $(BUILD)/deb/var/jb/Library/LaunchDaemons
+	@mkdir -p $(BUILD)/deb/DEBIAN $(BUILD)/deb/var/jb/Applications
 	@cp -R $(APP) $(BUILD)/deb/var/jb/Applications/
-	# The daemon plist must ship in the package: without it sessiond is never
-	# loaded, every session silently falls back to a local pty, and shells die
-	# with the app — the one thing this terminal promises not to do.
-	@cp $(DAEMON_PLIST) $(BUILD)/deb/var/jb/Library/LaunchDaemons/
 	@printf 'Package: %s\nName: %s\nVersion: %s\nArchitecture: iphoneos-arm64\nDescription: A modern terminal emulator for jailbroken iOS.\nMaintainer: diffTerm\nAuthor: diffTerm\nSection: Terminal_Support\nDepends: firmware (>= $(DEPLOY_MIN))\nTag: role::hacker\n' \
 		"$(BUNDLE_ID)" "$(APP_NAME)" "$(VERSION)" > $(BUILD)/deb/DEBIAN/control
-	# postinst loads the daemon (idempotently: bootout first so upgrades
-	# re-bootstrap rather than error), prerm stops it so KeepAlive does not
-	# respawn it against a bundle that is being removed.
-	@printf '#!/bin/sh\nPLIST=/var/jb/Library/LaunchDaemons/dev.diffterm.sessiond.plist\nlaunchctl bootout system "$$PLIST" 2>/dev/null\nlaunchctl bootstrap system "$$PLIST" 2>/dev/null || launchctl load -w "$$PLIST" 2>/dev/null\nuicache -p /var/jb/Applications/$(APP_NAME).app\nexit 0\n' > $(BUILD)/deb/DEBIAN/postinst
-	@printf '#!/bin/sh\nPLIST=/var/jb/Library/LaunchDaemons/dev.diffterm.sessiond.plist\nlaunchctl bootout system "$$PLIST" 2>/dev/null || launchctl unload -w "$$PLIST" 2>/dev/null\nuicache -u /var/jb/Applications/$(APP_NAME).app\nexit 0\n' > $(BUILD)/deb/DEBIAN/prerm
+	# The same maintainer scripts the published package ships, so an upgrade
+	# from a local build gets the same cleanup. Only the app they register
+	# follows APP_NAME.
+	@for script in postinst prerm; do \
+	   sed 's|^APP=.*|APP=$(INSTALLED)|' packaging/DEBIAN/$$script > $(BUILD)/deb/DEBIAN/$$script; \
+	 done
 	@chmod 755 $(BUILD)/deb/DEBIAN/postinst $(BUILD)/deb/DEBIAN/prerm
 	# --root-owner-group: build as any user, install as root.
 	@dpkg-deb --root-owner-group -Zgzip -b $(BUILD)/deb $(BUILD)/$(APP_NAME)_$(VERSION).deb

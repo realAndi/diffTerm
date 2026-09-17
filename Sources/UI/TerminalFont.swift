@@ -133,13 +133,20 @@ final class GlyphCache {
     enum Entry {
         /// A glyph present in the requested face — the fast path.
         case glyph(CGGlyph)
-        /// Needs font fallback or shaping; drawn as a laid-out line.
+        /// Needs font fallback or shaping; drawn as a laid-out line, in
+        /// whatever fill colour the context has when it is drawn.
         case line(CTLine, width: CGFloat)
         case blank
     }
 
     private var storage: [Key: Entry] = [:]
     private let font: TerminalFont
+
+    /// Printable ASCII by style, found by index rather than by hashing a
+    /// `Character` for nearly every cell of every frame. 0 means not looked up
+    /// yet, `missing` means the face lacks it, anything else is glyph + 1.
+    private var asciiGlyphs = [UInt32](repeating: 0, count: 4 * 128)
+    private static let missing = UInt32.max
 
     private struct Key: Hashable {
         let ch: Character
@@ -151,22 +158,27 @@ final class GlyphCache {
         storage.reserveCapacity(1024)
     }
 
-    func entry(for ch: Character, style: TerminalFont.Style, color: Theme.RGB) -> Entry {
+    func entry(for ch: Character, style: TerminalFont.Style) -> Entry {
         if ch == " " { return .blank }
-        let key = Key(ch: ch, style: style.rawValue)
-        if let cached = storage[key] {
-            // Fallback lines bake in their colour, so they can't be shared
-            // across colours; re-make those and cache only the common case.
-            if case .line = cached {
-                return makeEntry(ch: ch, style: style, color: color)
+        if let ascii = ch.asciiValue {
+            let slot = style.rawValue * 128 + Int(ascii)
+            let known = asciiGlyphs[slot]
+            if known != 0, known != GlyphCache.missing { return .glyph(CGGlyph(known - 1)) }
+            if known == 0 {
+                let made = makeEntry(ch: ch, style: style)
+                if case .glyph(let glyph) = made {
+                    asciiGlyphs[slot] = UInt32(glyph) + 1
+                    return made
+                }
+                asciiGlyphs[slot] = GlyphCache.missing
             }
-            return cached
         }
-        let made = makeEntry(ch: ch, style: style, color: color)
-        if case .line = made {
-            // Don't store colour-specific entries.
-            return made
-        }
+        let key = Key(ch: ch, style: style.rawValue)
+        if let cached = storage[key] { return cached }
+        // Fallback lines used to bake their colour in, so they were never
+        // cached and every emoji or CJK cell laid out a fresh line each frame.
+        // They take the context's colour now, so one entry serves them all.
+        let made = makeEntry(ch: ch, style: style)
         if storage.count > 4096 { storage.removeAll(keepingCapacity: true) }
         storage[key] = made
         return made
@@ -190,21 +202,24 @@ final class GlyphCache {
         return s + "\u{FE0E}"
     }
 
-    private func makeEntry(ch: Character, style: TerminalFont.Style, color: Theme.RGB) -> Entry {
+    private func makeEntry(ch: Character, style: TerminalFont.Style) -> Entry {
         let face = font.font(for: style)
-        let utf16 = Array(String(ch).utf16)
 
-        if utf16.count == 1 {
-            var glyph = CGGlyph(0)
-            var unit = utf16[0]
-            if CTFontGetGlyphsForCharacters(face, &unit, &glyph, 1), glyph != 0 {
-                return .glyph(glyph)
+        // A single scalar is a single glyph the face either has or lacks —
+        // including one past U+FFFF, which UTF-16 spells as two units. Those
+        // used to skip this check entirely, so the Nerd Font icons that live
+        // up there always went the slow way, even though the font has them.
+        if ch.unicodeScalars.count == 1 {
+            var units = Array(String(ch).utf16)
+            var glyphs = [CGGlyph](repeating: 0, count: units.count)
+            if CTFontGetGlyphsForCharacters(face, &units, &glyphs, units.count), glyphs[0] != 0 {
+                return .glyph(glyphs[0])
             }
         }
 
         let attrs: [NSAttributedString.Key: Any] = [
             .font: face,
-            .foregroundColor: color.uiColor,
+            NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String): true,
         ]
         let line = CTLineCreateWithAttributedString(
             NSAttributedString(string: GlyphCache.presentationCorrected(ch), attributes: attrs))

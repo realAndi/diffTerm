@@ -114,6 +114,9 @@ final class SplitContainerController: UIViewController {
         pane.removeFromParent()
         pane.session.detachView()
         pane.session.stop()
+        // Stopping a running command never posts commandStateDidChange, so post
+        // it ourselves for the root to re-evaluate the keep-awake.
+        NotificationCenter.default.post(name: TerminalSession.commandStateDidChangeNotification, object: pane.session)
     }
 
     // MARK: - Layout

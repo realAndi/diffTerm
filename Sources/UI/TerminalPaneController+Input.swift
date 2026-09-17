@@ -47,6 +47,12 @@ extension TerminalPaneController: TerminalSessionDelegate {
     }
 
     func sessionDidRing(_ session: TerminalSession) {
+        // Rate-limit all bell styles: a program printing BEL in a loop
+        // would otherwise produce a haptic or flash storm.
+        let now = CACurrentMediaTime()
+        guard now - lastBellAt > 0.25 else { return }
+        lastBellAt = now
+
         switch Preferences.shared.bell {
         case .none:
             break
@@ -221,6 +227,7 @@ extension TerminalPaneController {
             command("Bigger Text", "+", .command, #selector(commandIncreaseFontSize)),
             command("Bigger Text", "=", .command, #selector(commandIncreaseFontSize)),
             command("Smaller Text", "-", .command, #selector(commandDecreaseFontSize)),
+            command("Actual Size", "0", .command, #selector(commandResetFontSize)),
             command("Previous Prompt", UIKeyCommand.inputUpArrow, .command,
                     #selector(commandPreviousPrompt)),
             command("Next Prompt", UIKeyCommand.inputDownArrow, .command,
@@ -250,6 +257,12 @@ extension TerminalPaneController {
 
     @objc func commandDecreaseFontSize() {
         Preferences.shared.fontSize = Preferences.shared.fontSize - 1
+    }
+
+    @objc func commandResetFontSize() {
+        // No point rewriting the preference when nothing has changed.
+        guard Preferences.shared.fontSize != DeviceMetrics.defaultFontSize else { return }
+        Preferences.shared.fontSize = DeviceMetrics.defaultFontSize
     }
 
     @objc func commandSelectTab(_ sender: UIKeyCommand) {

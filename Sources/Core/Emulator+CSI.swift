@@ -87,10 +87,12 @@ extension Emulator {
     }
 
     private func applyCursorStyle(_ value: Int) {
-        // 0/1 blinking block, 2 steady block, 3 blinking underline,
+        // 0 the user's default, 1 blinking block, 2 steady block, 3 blinking underline,
         // 4 steady underline, 5 blinking bar, 6 steady bar.
+        cursorShapeSetByProgram = value != 0
         switch value {
-        case 0, 1: modes.cursorShape = .block;     modes.cursorBlink = true
+        case 0:    modes.cursorShape = defaultCursorShape; modes.cursorBlink = true
+        case 1:    modes.cursorShape = .block;     modes.cursorBlink = true
         case 2:    modes.cursorShape = .block;     modes.cursorBlink = false
         case 3:    modes.cursorShape = .underline; modes.cursorBlink = true
         case 4:    modes.cursorShape = .underline; modes.cursorBlink = false

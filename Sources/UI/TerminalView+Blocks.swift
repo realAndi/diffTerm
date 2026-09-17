@@ -86,10 +86,10 @@ extension TerminalView {
             let path = UIBezierPath(roundedRect: card, cornerRadius: radius)
             ctx.saveGState()
             ctx.addPath(path.cgPath)
-            ctx.setFillColor((palette.wash ?? cardBackground).cgColor)
+            ctx.setFillColor(cgColor(palette.wash ?? cardBackground))
             ctx.fillPath()
             ctx.addPath(path.cgPath)
-            ctx.setStrokeColor(cardBorder.cgColor)
+            ctx.setStrokeColor(cgColor(cardBorder))
             ctx.setLineWidth(1 / (window?.screen.scale ?? UIScreen.main.scale))
             ctx.strokePath()
             ctx.restoreGState()
@@ -98,7 +98,7 @@ extension TerminalView {
             let railRect = CGRect(x: cardX + railInset, y: top + radius,
                                   width: railWidth, height: max(0, card.height - radius * 2))
             let rail = UIBezierPath(roundedRect: railRect, cornerRadius: railWidth / 2)
-            ctx.setFillColor(palette.rail.cgColor)
+            ctx.setFillColor(cgColor(palette.rail))
             ctx.addPath(rail.cgPath)
             ctx.fillPath()
 

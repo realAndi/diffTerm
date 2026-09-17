@@ -42,7 +42,6 @@ final class TerminalView: UIView {
 
     var boldIsBright = true
     var useBoldFont = true
-    var preferredCursorShape: CursorShape = .block
 
     /// Draws the per-command chrome and reserves the gutter it lives in.
     ///
@@ -189,6 +188,7 @@ final class TerminalView: UIView {
 
     func update(palette: TerminalPalette) {
         self.palette = palette
+        cgColors.removeAll(keepingCapacity: true)
         backgroundColor = palette.defaultBackground.uiColor
         setNeedsDisplay()
     }
@@ -287,6 +287,29 @@ final class TerminalView: UIView {
         let color: Theme.RGB
     }
 
+    private struct GlyphRun {
+        var glyphs: [CGGlyph] = []
+        var positions: [CGPoint] = []
+
+        mutating func add(_ glyph: CGGlyph, at position: CGPoint) {
+            glyphs.append(glyph)
+            positions.append(position)
+        }
+    }
+
+    /// CGColors by value. Asking a fresh UIColor for its CGColor on every fill
+    /// allocated twice per background run and per glyph batch, every frame.
+    private var cgColors: [Theme.RGB: CGColor] = [:]
+
+    func cgColor(_ rgb: Theme.RGB) -> CGColor {
+        if let color = cgColors[rgb] { return color }
+        // Truecolor output can name thousands of colours; do not keep them all.
+        if cgColors.count > 512 { cgColors.removeAll(keepingCapacity: true) }
+        let color = rgb.cgColor
+        cgColors[rgb] = color
+        return color
+    }
+
     override func draw(_ rect: CGRect) {
         guard let ctx = UIGraphicsGetCurrentContext(), let emulator else { return }
 
@@ -297,7 +320,7 @@ final class TerminalView: UIView {
         // Base fill. Under reverse video the whole screen inverts, including
         // the margins that no cell covers.
         let baseBG = reverse ? palette.defaultForeground : palette.defaultBackground
-        ctx.setFillColor(baseBG.cgColor)
+        ctx.setFillColor(cgColor(baseBG))
         ctx.fill(rect)
 
         let gutterX = gutterWidth
@@ -330,9 +353,24 @@ final class TerminalView: UIView {
         // both paths to agree on where a baseline is.
         let flipHeight = bounds.height
 
-        var buckets: [GlyphBucketKey: (glyphs: [CGGlyph], positions: [CGPoint])] = [:]
+        var buckets: [GlyphBucketKey: GlyphRun] = [:]
         var decorations: [(rect: CGRect, color: Theme.RGB, style: DecorationStyle)] = []
-        var fallbacks: [(line: CTLine, point: CGPoint)] = []
+        var fallbacks: [(line: CTLine, point: CGPoint, color: Theme.RGB)] = []
+
+        // Neighbouring cells nearly always share attributes, so a resolved
+        // pair is reused until they change rather than worked out per cell.
+        var resolvedAttrs: CellAttributes?
+        var resolvedSelected = false
+        var resolved: (fg: Theme.RGB, bg: Theme.RGB) = (palette.defaultForeground, palette.defaultBackground)
+        func colours(_ attrs: CellAttributes, selected: Bool) -> (fg: Theme.RGB, bg: Theme.RGB) {
+            if attrs != resolvedAttrs || selected != resolvedSelected {
+                resolved = palette.resolve(attrs, reverseVideo: reverse,
+                                           boldIsBright: boldIsBright, selected: selected)
+                resolvedAttrs = attrs
+                resolvedSelected = selected
+            }
+            return resolved
+        }
 
         let cursorRow = buffer.scrollbackCount + buffer.cursorY
         let cursorCol = buffer.cursorX
@@ -355,17 +393,14 @@ final class TerminalView: UIView {
                 let color: Theme.RGB?
                 if col < width {
                     let selected = selection?.contains(row: absRow, col: col) ?? false
-                    let resolved = palette.resolve(line[col].attrs,
-                                                   reverseVideo: reverse,
-                                                   boldIsBright: boldIsBright,
-                                                   selected: selected)
-                    color = resolved.bg == baseBG ? nil : resolved.bg
+                    let bg = colours(line[col].attrs, selected: selected).bg
+                    color = bg == baseBG ? nil : bg
                 } else {
                     color = nil
                 }
                 if color != runColor {
                     if let rc = runColor, col > runStart {
-                        ctx.setFillColor(rc.cgColor)
+                        ctx.setFillColor(cgColor(rc))
                         ctx.fill(CGRect(x: gutterX + CGFloat(runStart) * cellW, y: y,
                                         width: CGFloat(col - runStart) * cellW, height: cellH))
                     }
@@ -384,10 +419,9 @@ final class TerminalView: UIView {
                     && !cell.attrs.flags.contains(.overline) { continue }
 
                 let selected = selection?.contains(row: absRow, col: col) ?? false
-                var (fg, _) = palette.resolve(cell.attrs,
-                                              reverseVideo: reverse,
-                                              boldIsBright: boldIsBright,
-                                              selected: selected)
+                var fg = colours(cell.attrs, selected: selected).fg
+                // Whether this glyph spans two cells, from the grid itself.
+                let isWide = col + 1 < line.count && line[col + 1].attrs.flags.contains(.wideTrailer)
 
                 // Text sitting under a block cursor is drawn in the cursor's
                 // contrasting colour instead of its own.
@@ -400,16 +434,15 @@ final class TerminalView: UIView {
 
                 if cell.ch != " " {
                     let style = TerminalFont.Style(flags: cell.attrs.flags, allowBold: useBoldFont)
-                    switch glyphCache.entry(for: cell.ch, style: style, color: fg) {
+                    switch glyphCache.entry(for: cell.ch, style: style) {
                     case .glyph(let g):
                         let key = GlyphBucketKey(style: style.rawValue, color: fg)
-                        buckets[key, default: ([], [])].glyphs.append(g)
-                        buckets[key]!.positions.append(CGPoint(x: x, y: flipHeight - baseline))
+                        buckets[key, default: GlyphRun()].add(g, at: CGPoint(x: x, y: flipHeight - baseline))
                     case .line(let ctLine, let lineWidth):
                         // Centre fallback glyphs (emoji, CJK) in their cells.
-                        let cellSpan = CharWidth.width(of: cell.ch) == 2 ? cellW * 2 : cellW
+                        let cellSpan = isWide ? cellW * 2 : cellW
                         let dx = max(0, (cellSpan - lineWidth) / 2)
-                        fallbacks.append((ctLine, CGPoint(x: x + dx, y: flipHeight - baseline)))
+                        fallbacks.append((ctLine, CGPoint(x: x + dx, y: flipHeight - baseline), fg))
                     case .blank:
                         break
                     }
@@ -417,7 +450,7 @@ final class TerminalView: UIView {
 
                 let flags = cell.attrs.flags
                 if flags.anyUnderline || flags.contains(.strikethrough) || flags.contains(.overline) {
-                    let span = CharWidth.width(of: cell.ch) == 2 ? cellW * 2 : cellW
+                    let span = isWide ? cellW * 2 : cellW
                     let decoColor = cell.attrs.underlineColor == .default
                         ? fg
                         : palette.rgb(for: cell.attrs.underlineColor, fallback: fg)
@@ -452,12 +485,14 @@ final class TerminalView: UIView {
 
         for (key, batch) in buckets {
             guard !batch.glyphs.isEmpty else { continue }
-            ctx.setFillColor(key.color.cgColor)
+            ctx.setFillColor(cgColor(key.color))
             let face = terminalFont.fonts[key.style]
             CTFontDrawGlyphs(face, batch.glyphs, batch.positions, batch.glyphs.count, ctx)
         }
 
-        for (line, point) in fallbacks {
+        for (line, point, color) in fallbacks {
+            // The line takes its colour from the context (see GlyphCache).
+            ctx.setFillColor(cgColor(color))
             ctx.textPosition = point
             CTLineDraw(line, ctx)
         }
@@ -467,7 +502,7 @@ final class TerminalView: UIView {
         ctx.restoreGState()
 
         for deco in decorations {
-            ctx.setFillColor(deco.color.cgColor)
+            ctx.setFillColor(cgColor(deco.color))
             switch deco.style {
             case .line:
                 ctx.fill(deco.rect)

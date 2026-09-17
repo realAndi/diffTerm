@@ -87,6 +87,8 @@ final class ClipboardServer {
         // queue on the next accept().
         let flags = fcntl(fd, F_GETFL, 0)
         _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+        // A shell must not inherit the listener.
+        _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
 
         listenFD = fd
         directory = dir
@@ -141,6 +143,7 @@ final class ClipboardServer {
         while true {
             let fd = accept(listenFD, nil, nil)
             guard fd >= 0 else { return }
+            Self.prepareConnection(fd)
             // One short-lived connection per invocation of the helper; handling
             // it off the accept queue keeps a read prompt, which can sit on
             // screen for a minute, from blocking the listener.
@@ -151,12 +154,27 @@ final class ClipboardServer {
         }
     }
 
+    /// An accepted socket inherits O_NONBLOCK from the listener on Darwin, so
+    /// the plain read and write loops below gave up at the first EAGAIN —
+    /// anything past one socket buffer, about 8 KiB, failed. They are written
+    /// for a blocking socket, so make it one, with timeouts so a helper that
+    /// stops talking cannot park a thread forever.
+    private static func prepareConnection(_ fd: Int32) {
+        let flags = fcntl(fd, F_GETFL, 0)
+        if flags >= 0 { _ = fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) }
+        _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
+        var timeout = timeval(tv_sec: 10, tv_usec: 0)
+        let size = socklen_t(MemoryLayout<timeval>.size)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, size)
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, size)
+    }
+
     private func serve(_ fd: Int32) {
         guard let request = readLine(fd, limit: 64) else { return }
 
         if request == "PASTE" {
             guard readIsPermitted() else {
-                _ = write(fd, "ERR clipboard reads are turned off in diffTerm's settings\n", 57)
+                reply(fd, "ERR clipboard reads are turned off in diffTerm's settings\n")
                 return
             }
             let text = DispatchQueue.main.sync { UIPasteboard.general.string ?? "" }

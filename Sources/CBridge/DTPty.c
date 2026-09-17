@@ -50,6 +50,13 @@ int dt_spawn_pty(const char *path,
     cfsetispeed(&tio, B38400);
     cfsetospeed(&tio, B38400);
 
+    /* The descriptor ceiling is read here, not in the child: getdtablesize is
+       not on the async-signal-safe list. Clamped because the soft limit can be
+       enormous (61440 on macOS), and every close is a syscall. */
+    int fd_ceiling = getdtablesize();
+    if (fd_ceiling < 256) fd_ceiling = 256;
+    if (fd_ceiling > 65536) fd_ceiling = 65536;
+
     int master = -1;
     pid_t pid = forkpty(&master, NULL, &tio, &ws);
     if (pid < 0) {
@@ -74,6 +81,14 @@ int dt_spawn_pty(const char *path,
         sigset_t empty;
         sigemptyset(&empty);
         sigprocmask(SIG_SETMASK, &empty, NULL);
+
+        /* Nothing past stdio belongs to the shell. Without this every shell
+           inherited whatever the app had open that nobody marked
+           close-on-exec, and a program in one tab could reach descriptors
+           that belong to the app or to another tab. */
+        for (int fd = STDERR_FILENO + 1; fd < fd_ceiling; fd++) {
+            (void)close(fd);
+        }
 
         execve(path, argv, envp);
         /* execve only returns on failure; _exit avoids running any atexit
@@ -112,6 +127,16 @@ int dt_try_reap(pid_t pid, int *status) {
     if (r < 0) return -errno;
     if (status) *status = st;
     return 1;
+}
+
+int dt_child_running(pid_t pid) {
+    if (pid <= 0) return 0;
+    siginfo_t info;
+    memset(&info, 0, sizeof(info));
+    /* WNOWAIT: look without reaping, so whoever owns the reap still sees the
+       exit status. An exited-but-unreaped child reports its pid here. */
+    if (waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT) != 0) return 0;
+    return info.si_pid == 0 ? 1 : 0;
 }
 
 pid_t dt_foreground_pid(int master) {

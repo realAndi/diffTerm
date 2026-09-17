@@ -5,6 +5,25 @@ import Foundation
 /// its own and keeps the emulator free of byte-level bookkeeping.
 protocol ParserDelegate: AnyObject {
     func parserPrint(_ ch: Character)
+    /// A printable ASCII character (0x20-0x7E). Split out from `parserPrint`
+    /// because it is nearly all of what a terminal is shown, and it needs none
+    /// of the grapheme or width machinery a general `Character` does.
+    func parserPrintASCII(_ byte: UInt8)
+    /// Several printable ASCII characters in a row, each already known to be
+    /// a complete grapheme. Handing a run over in one call is what lets the
+    /// emulator fill cells in a loop instead of paying per-byte dispatch.
+    func parserPrintASCIIRun(_ run: UnsafeBufferPointer<UInt8>)
+    /// A non-ASCII scalar that is a complete grapheme on its own, with its
+    /// width already known from `CharWidth.standaloneWidth`. The same as
+    /// `parserPrint` with a one-scalar `Character`, without the Unicode
+    /// property lookups that measuring one costs.
+    func parserPrintScalar(_ scalar: Unicode.Scalar, width: Int)
+    /// Several characters in a row, each printable ASCII or the well-formed
+    /// UTF-8 for a scalar `CharWidth.standaloneWidth` accepts, and each
+    /// already known to be a complete grapheme. The same as handing them to
+    /// `parserPrintASCII` and `parserPrintScalar` one at a time; text in most
+    /// languages mixes the two too closely for the ASCII run to cover it.
+    func parserPrintTextRun(_ run: UnsafeBufferPointer<UInt8>)
     /// A C0/C1 control that executes immediately (BEL, BS, LF, CR, ...).
     func parserExecute(_ byte: UInt8)
     /// ESC <intermediates> <final>
@@ -20,15 +39,25 @@ protocol ParserDelegate: AnyObject {
 
 /// CSI parameters, including colon-separated sub-parameters (SGR 38:2::r:g:b).
 struct ParamList {
-    /// Each entry is a parameter with its sub-parameters; `nil` means omitted.
-    private(set) var groups: [[Int?]] = [[nil]]
+    /// Every parameter and sub-parameter, in order; -1 means omitted. Flat
+    /// rather than an array of arrays, because the nested form allocated at
+    /// least twice for every CSI sequence — every colour change included —
+    /// where this reuses its storage for the life of the parser.
+    private var values: [Int] = [-1]
+    /// Where each parameter's group starts in `values`.
+    private var starts: [Int] = [0]
 
-    var count: Int { groups.count }
+    var count: Int { starts.count }
+
+    private func group(_ i: Int) -> Range<Int> {
+        starts[i] ..< (i + 1 < starts.count ? starts[i + 1] : values.count)
+    }
 
     /// Primary value of parameter `i`, or `def` if absent/zero-length.
     func at(_ i: Int, default def: Int = 0) -> Int {
-        guard i < groups.count, let v = groups[i].first ?? nil else { return def }
-        return v
+        guard i < starts.count else { return def }
+        let v = values[starts[i]]
+        return v < 0 ? def : v
     }
 
     /// Like `at`, but treats an explicit 0 as "use the default" — the
@@ -39,35 +68,41 @@ struct ParamList {
     }
 
     func sub(_ i: Int, _ j: Int, default def: Int = 0) -> Int {
-        guard i < groups.count, j < groups[i].count, let v = groups[i][j] else { return def }
-        return v
+        guard i < starts.count else { return def }
+        let g = group(i)
+        guard j < g.count else { return def }
+        let v = values[g.lowerBound + j]
+        return v < 0 ? def : v
     }
 
     func subCount(_ i: Int) -> Int {
-        i < groups.count ? groups[i].count : 0
+        i < starts.count ? group(i).count : 0
     }
 
-    var isEmpty: Bool { groups.count == 1 && (groups[0].first ?? nil) == nil }
+    var isEmpty: Bool { starts.count == 1 && values[0] < 0 }
 
-    fileprivate mutating func reset() { groups = [[nil]] }
+    fileprivate mutating func reset() {
+        values.removeAll(keepingCapacity: true)
+        values.append(-1)
+        starts.removeAll(keepingCapacity: true)
+        starts.append(0)
+    }
 
     fileprivate mutating func digit(_ d: Int) {
-        let last = groups.count - 1
-        let sub = groups[last].count - 1
-        let cur = groups[last][sub] ?? 0
+        let last = values.count - 1
         // Clamp rather than overflow; xterm caps parameters at 65535.
-        groups[last][sub] = min(cur &* 10 &+ d, 65535)
+        values[last] = min(max(values[last], 0) &* 10 &+ d, 65535)
     }
 
     fileprivate mutating func nextParam() {
-        guard groups.count < 32 else { return }
-        groups.append([nil])
+        guard starts.count < 32 else { return }
+        starts.append(values.count)
+        values.append(-1)
     }
 
     fileprivate mutating func nextSubParam() {
-        let last = groups.count - 1
-        guard groups[last].count < 32 else { return }
-        groups[last].append(nil)
+        guard subCount(starts.count - 1) < 32 else { return }
+        values.append(-1)
     }
 }
 
@@ -92,7 +127,12 @@ final class Parser {
         case sosPmApcString
     }
 
-    weak var delegate: ParserDelegate?
+    /// Unowned-unsafe rather than weak: the parser calls out once per byte,
+    /// and a weak load (side-table lookup plus an atomic retain/release) on
+    /// every one of those calls was a double-digit share of total parse time.
+    /// The emulator creates and owns its parser and is the only thing that
+    /// feeds it, so the parser cannot outlive its delegate.
+    private unowned(unsafe) let delegate: ParserDelegate
 
     private(set) var state: State = .ground
     private var params = ParamList()
@@ -107,19 +147,32 @@ final class Parser {
     private var oscOverflowed = false
     private var ignoring = false
 
-    // Incremental UTF-8 decoding state.
-    private var utf8Buf: [UInt8] = []
+    // Incremental UTF-8 decoding state. The scalar is assembled as its bytes
+    // arrive rather than collected and decoded through String, which cost a
+    // String per non-ASCII character.
+    private var utf8Value: UInt32 = 0
     private var utf8Needed = 0
+    private var utf8Length = 0
 
     // Grapheme accumulation: a combining mark must attach to the character
     // before it, so we hold one pending cluster back until we know it's done.
     private var pendingCluster: String = ""
+    /// The same hold-back for a lone printable ASCII character, kept as a byte
+    /// so the common case never touches String. At most one of this,
+    /// `pendingScalar` and `pendingCluster` is non-empty. 0 means nothing is
+    /// held.
+    private var pendingASCII: UInt8 = 0
+    /// The same again for a lone scalar `CharWidth.standaloneWidth` accepts,
+    /// with that width. Neither printable ASCII nor another such scalar can
+    /// join one, so either arriving completes it without asking String.
+    /// 0 means nothing is held.
+    private var pendingScalar: UInt32 = 0
+    private var pendingWidth = 0
 
-    init(delegate: ParserDelegate? = nil) {
+    init(delegate: ParserDelegate) {
         self.delegate = delegate
         intermediates.reserveCapacity(4)
         oscBuffer.reserveCapacity(256)
-        utf8Buf.reserveCapacity(4)
     }
 
     func reset() {
@@ -130,14 +183,37 @@ final class Parser {
         oscBuffer.removeAll(keepingCapacity: true)
         oscLimit = Parser.defaultOSCLimit
         oscOverflowed = false
-        utf8Buf.removeAll(keepingCapacity: true)
         utf8Needed = 0
         flushCluster()
         ignoring = false
     }
 
     func parse(_ bytes: UnsafeBufferPointer<UInt8>) {
-        for b in bytes { step(b) }
+        var i = 0
+        let count = bytes.count
+        while i < count {
+            // Fast path: printable ASCII in the ground state — which is most
+            // of what any program writes — is scanned ahead and delivered as
+            // one run rather than stepped through the state machine per byte.
+            if state == .ground, utf8Needed == 0, pendingCluster.isEmpty,
+               Parser.isPrintableASCII(bytes[i]) {
+                var end = i + 1
+                while end < count, Parser.isPrintableASCII(bytes[end]) { end += 1 }
+                emitASCIIRun(UnsafeBufferPointer(rebasing: bytes[i..<end]))
+                i = end
+                continue
+            }
+            // The same for text that starts with a multi-byte character.
+            if bytes[i] >= 0xC2, state == .ground, utf8Needed == 0 {
+                let end = emitUTF8Text(bytes, from: i)
+                if end != i {
+                    i = end
+                    continue
+                }
+            }
+            step(bytes[i])
+            i += 1
+        }
         // Anything still pending at the end of a read is flushed so the user
         // sees it now; if a combining mark arrives in the next read it will
         // be applied to the cell via the emulator's combining path.
@@ -151,17 +227,143 @@ final class Parser {
     // MARK: - Grapheme buffering
 
     private func flushCluster() {
+        flushHeldCharacter()
         guard !pendingCluster.isEmpty else { return }
-        for ch in pendingCluster { delegate?.parserPrint(ch) }
+        for ch in pendingCluster { delegate.parserPrint(ch) }
         pendingCluster.removeAll(keepingCapacity: true)
     }
 
+    /// Prints a held ASCII or standalone character, if there is one. Kept
+    /// apart from `flushCluster` so the paths that know no String is held
+    /// can have it inlined rather than pay for a call.
+    @inline(__always)
+    private func flushHeldCharacter() {
+        if pendingASCII != 0 {
+            delegate.parserPrintASCII(pendingASCII)
+            pendingASCII = 0
+        } else if pendingScalar != 0 {
+            delegate.parserPrintScalar(Unicode.Scalar(pendingScalar).unsafelyUnwrapped, width: pendingWidth)
+            pendingScalar = 0
+        }
+    }
+
+    @inline(__always)
+    private static func isPrintableASCII(_ b: UInt8) -> Bool { b >= 0x20 && b < 0x7F }
+
+    /// Delivers a run of printable ASCII. Every character but the last is
+    /// complete; the last is held back like any other, because a combining
+    /// mark may still follow it.
+    private func emitASCIIRun(_ run: UnsafeBufferPointer<UInt8>) {
+        // Printable ASCII never extends what is held, so it is complete.
+        flushHeldCharacter()
+        if run.count > 1 {
+            delegate.parserPrintASCIIRun(UnsafeBufferPointer(rebasing: run.dropLast()))
+        }
+        pendingASCII = run[run.count - 1]
+    }
+
+    /// Handles the multi-byte character at `start`, if all of it is in
+    /// `bytes` and it is well formed, and returns where the text it starts
+    /// ends. Returns `start` for anything else — a sequence split across
+    /// reads, a malformed one — which is left to the byte-at-a-time path,
+    /// where the replacement-character rules live.
+    ///
+    /// Out of line on purpose: inlined, it made the parse loop slower for
+    /// the escape-sequence bytes that never come here.
+    @inline(never)
+    private func emitUTF8Text(_ bytes: UnsafeBufferPointer<UInt8>, from start: Int) -> Int {
+        let (first, firstLength) = Parser.decodeUTF8Sequence(bytes, at: start)
+        guard firstLength != 0 else { return start }
+        let firstWidth = CharWidth.standaloneWidth(first)
+        guard firstWidth != 0, pendingCluster.isEmpty else {
+            emit(Unicode.Scalar(first).unsafelyUnwrapped)
+            return start + firstLength
+        }
+        // A standalone character with no cluster held for it to join: take
+        // what follows for as long as it is printable ASCII or standalone
+        // too. Neither kind joins the other, so every character but the last
+        // is complete and goes out as one run; the last is held, as `emit`
+        // would hold it.
+        let count = bytes.count
+        var end = start + firstLength
+        var last = start                    // where the last character starts
+        var lastValue = first
+        var lastWidth = firstWidth
+        while end < count {
+            if Parser.isPrintableASCII(bytes[end]) {
+                last = end
+                end += 1
+                continue
+            }
+            let (value, length) = Parser.decodeUTF8Sequence(bytes, at: end)
+            guard length != 0 else { break }
+            let width = CharWidth.standaloneWidth(value)
+            guard width != 0 else { break }
+            last = end
+            lastValue = value
+            lastWidth = width
+            end += length
+        }
+        flushHeldCharacter()
+        if last > start {
+            delegate.parserPrintTextRun(UnsafeBufferPointer(rebasing: bytes[start..<last]))
+        }
+        if bytes[last] < 0x80 {
+            pendingASCII = bytes[last]
+        } else {
+            pendingScalar = lastValue
+            pendingWidth = lastWidth
+        }
+        return end
+    }
+
     private func emit(_ scalar: Unicode.Scalar) {
+        let v = scalar.value
+        // Fast paths. A printable ASCII character never joins the cluster of
+        // an ASCII character before it (CR LF is the only ASCII pair Unicode
+        // keeps together, and neither is printable), nor of a standalone
+        // scalar, so when all that is held is one of those, the held
+        // character is complete the moment another arrives. The same goes
+        // for a standalone scalar arriving after either.
+        if v < 0x80, pendingCluster.isEmpty {
+            flushHeldCharacter()
+            pendingASCII = UInt8(truncatingIfNeeded: v)
+            return
+        }
+        let width = CharWidth.standaloneWidth(v)
+        if width != 0, pendingCluster.isEmpty {
+            flushHeldCharacter()
+            pendingScalar = v
+            pendingWidth = width
+            return
+        }
+        if pendingASCII != 0 {
+            pendingCluster.unicodeScalars.append(Unicode.Scalar(pendingASCII))
+            pendingASCII = 0
+        }
+        if pendingScalar != 0 {
+            pendingCluster.unicodeScalars.append(Unicode.Scalar(pendingScalar).unsafelyUnwrapped)
+            pendingScalar = 0
+        }
         pendingCluster.unicodeScalars.append(scalar)
         // Once the buffer holds more than one grapheme, the first is complete.
         if pendingCluster.count > 1 {
             let done = pendingCluster.removeFirst()
-            delegate?.parserPrint(done)
+            delegate.parserPrint(done)
+            // Hand a lone ASCII or standalone remainder back to the fast
+            // paths, or one accented word would keep every character after
+            // it slow.
+            if pendingCluster.utf8.count == 1, let b = pendingCluster.utf8.first {
+                pendingASCII = b
+                pendingCluster.removeAll(keepingCapacity: true)
+            } else if width != 0,
+                      pendingCluster.utf8.count == (v < 0x800 ? 2 : v < 0x10000 ? 3 : 4) {
+                // A remainder that ends with the scalar just appended and is
+                // as long as it is that scalar alone.
+                pendingScalar = v
+                pendingWidth = width
+                pendingCluster.removeAll(keepingCapacity: true)
+            }
         }
     }
 
@@ -215,7 +417,7 @@ final class Parser {
     }
 
     private func leaveState() {
-        if state == .dcsPassthrough { delegate?.parserDCSUnhook() }
+        if state == .dcsPassthrough { delegate.parserDCSUnhook() }
         if state == .oscString { dispatchOSC() }
     }
 
@@ -224,7 +426,7 @@ final class Parser {
     private func ground(_ b: UInt8) {
         if b < 0x20 {
             flushCluster()
-            delegate?.parserExecute(b)
+            delegate.parserExecute(b)
             return
         }
         if b == 0x7F {                       // DEL is discarded
@@ -238,11 +440,10 @@ final class Parser {
     }
 
     private func decodeUTF8Start(_ b: UInt8) {
-        utf8Buf.removeAll(keepingCapacity: true)
         switch b {
-        case 0xC2...0xDF: utf8Needed = 1
-        case 0xE0...0xEF: utf8Needed = 2
-        case 0xF0...0xF4: utf8Needed = 3
+        case 0xC2...0xDF: utf8Needed = 1; utf8Value = UInt32(b & 0x1F)
+        case 0xE0...0xEF: utf8Needed = 2; utf8Value = UInt32(b & 0x0F)
+        case 0xF0...0xF4: utf8Needed = 3; utf8Value = UInt32(b & 0x07)
         default:
             // Stray continuation byte or overlong lead — show the standard
             // replacement rather than dropping input silently.
@@ -250,7 +451,7 @@ final class Parser {
             utf8Needed = 0
             return
         }
-        utf8Buf.append(b)
+        utf8Length = utf8Needed + 1
     }
 
     private func decodeUTF8(_ b: UInt8) {
@@ -258,17 +459,51 @@ final class Parser {
             // Truncated sequence: emit a replacement and reprocess this byte
             // from scratch so we don't lose a following ESC.
             emit("\u{FFFD}")
-            utf8Buf.removeAll(keepingCapacity: true)
             utf8Needed = 0
             step(b)
             return
         }
-        utf8Buf.append(b)
+        utf8Value = utf8Value << 6 | UInt32(b & 0x3F)
         utf8Needed -= 1
         guard utf8Needed == 0 else { return }
-        let decoded = String(decoding: utf8Buf, as: UTF8.self)
-        for s in decoded.unicodeScalars { emit(s) }
-        utf8Buf.removeAll(keepingCapacity: true)
+        if Parser.isWellFormed(utf8Value, length: utf8Length) {
+            emit(Unicode.Scalar(utf8Value).unsafelyUnwrapped)
+        } else {
+            // What String's decoding makes of a complete but overlong,
+            // surrogate or out-of-range sequence: its lead byte is not
+            // followed by a byte it allows, so every byte stands alone.
+            for _ in 0..<utf8Length { emit("\u{FFFD}") }
+        }
+    }
+
+    /// Whether `value`, assembled from a lead byte and its continuation
+    /// bytes, is the shortest encoding of a scalar.
+    @inline(__always)
+    private static func isWellFormed(_ value: UInt32, length: Int) -> Bool {
+        switch length {
+        case 2: return true                 // C0 and C1 leads never get here
+        case 3: return value >= 0x800 && (value < 0xD800 || value > 0xDFFF)
+        default: return value >= 0x10000 && value <= 0x10FFFF
+        }
+    }
+
+    /// Decodes the multi-byte character whose lead byte is at `i`, if all of
+    /// it is in `bytes` and it is well formed. Returns its scalar value and
+    /// length, or a length of 0.
+    @inline(__always)
+    static func decodeUTF8Sequence(_ bytes: UnsafeBufferPointer<UInt8>, at i: Int) -> (UInt32, Int) {
+        let lead = bytes[i]
+        guard lead >= 0xC2, lead <= 0xF4 else { return (0, 0) }
+        let length = lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4
+        guard i + length <= bytes.count else { return (0, 0) }
+        var value = UInt32(lead) & (0x7F >> UInt32(length))
+        for k in 1..<length {
+            let b = bytes[i + k]
+            guard b & 0xC0 == 0x80 else { return (0, 0) }
+            value = value << 6 | UInt32(b & 0x3F)
+        }
+        guard isWellFormed(value, length: length) else { return (0, 0) }
+        return (value, length)
     }
 
     // MARK: ESC
@@ -284,7 +519,7 @@ final class Parser {
     private func escape(_ b: UInt8) {
         switch b {
         case 0x00...0x17, 0x19, 0x1C...0x1F:
-            delegate?.parserExecute(b)
+            delegate.parserExecute(b)
         case 0x20...0x2F:
             intermediates.append(b)
             state = .escapeIntermediate
@@ -299,7 +534,7 @@ final class Parser {
         case 0x7F:
             break
         default:
-            delegate?.parserEscape(intermediates: intermediates, final: b)
+            delegate.parserEscape(intermediates: intermediates, final: b)
             state = .ground
         }
     }
@@ -307,13 +542,13 @@ final class Parser {
     private func escapeIntermediate(_ b: UInt8) {
         switch b {
         case 0x00...0x17, 0x19, 0x1C...0x1F:
-            delegate?.parserExecute(b)
+            delegate.parserExecute(b)
         case 0x20...0x2F:
             if intermediates.count < 4 { intermediates.append(b) } else { ignoring = true }
         case 0x7F:
             break
         default:
-            if !ignoring { delegate?.parserEscape(intermediates: intermediates, final: b) }
+            if !ignoring { delegate.parserEscape(intermediates: intermediates, final: b) }
             state = .ground
         }
     }
@@ -331,7 +566,7 @@ final class Parser {
     private func csiEntry(_ b: UInt8) {
         switch b {
         case 0x00...0x17, 0x19, 0x1C...0x1F:
-            delegate?.parserExecute(b)
+            delegate.parserExecute(b)
         case 0x20...0x2F:
             intermediates.append(b)
             state = .csiIntermediate
@@ -357,7 +592,7 @@ final class Parser {
     private func csiParam(_ b: UInt8) {
         switch b {
         case 0x00...0x17, 0x19, 0x1C...0x1F:
-            delegate?.parserExecute(b)
+            delegate.parserExecute(b)
         case 0x30...0x39:
             params.digit(Int(b - 0x30))
         case 0x3A:
@@ -379,7 +614,7 @@ final class Parser {
     private func csiIntermediate(_ b: UInt8) {
         switch b {
         case 0x00...0x17, 0x19, 0x1C...0x1F:
-            delegate?.parserExecute(b)
+            delegate.parserExecute(b)
         case 0x20...0x2F:
             if intermediates.count < 4 { intermediates.append(b) } else { ignoring = true }
         case 0x30...0x3F:
@@ -394,7 +629,7 @@ final class Parser {
     private func csiIgnore(_ b: UInt8) {
         switch b {
         case 0x00...0x17, 0x19, 0x1C...0x1F:
-            delegate?.parserExecute(b)
+            delegate.parserExecute(b)
         case 0x40...0x7E:
             state = .ground
         default:
@@ -403,7 +638,7 @@ final class Parser {
     }
 
     private func dispatchCSI(_ final: UInt8) {
-        delegate?.parserCSI(private: privatePrefix,
+        delegate.parserCSI(private: privatePrefix,
                             params: params,
                             intermediates: intermediates,
                             final: final)
@@ -476,7 +711,7 @@ final class Parser {
         // happens to land on a 4-byte boundary — silently copies the wrong
         // thing. Drop it instead.
         guard !oscOverflowed else { return }
-        delegate?.parserOSC(oscBuffer)
+        delegate.parserOSC(oscBuffer)
     }
 
     // MARK: DCS
@@ -535,7 +770,7 @@ final class Parser {
     }
 
     private func hookDCS(_ final: UInt8) {
-        delegate?.parserDCSHook(private: privatePrefix,
+        delegate.parserDCSHook(private: privatePrefix,
                                 params: params,
                                 intermediates: intermediates,
                                 final: final)
@@ -545,7 +780,7 @@ final class Parser {
     private func dcsPassthrough(_ b: UInt8) {
         switch b {
         case 0x00...0x17, 0x19, 0x1C...0x1F, 0x20...0x7E:
-            delegate?.parserDCSPut(b)
+            delegate.parserDCSPut(b)
         default:
             break
         }

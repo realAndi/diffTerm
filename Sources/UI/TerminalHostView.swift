@@ -184,8 +184,8 @@ final class TerminalHostView: UIView, UIKeyInput, UITextInputTraits {
         }
 
         if !modifiers.contains(.control) && !modifiers.contains(.alt) {
-            // Plain typing: let the text input path handle it so that dead
-            // keys and IME composition keep working.
+            // Send plain typing here and record it so insertText(_:) can
+            // discard the duplicate UIKit delivers moments later.
             lastHardwareText = (key.characters, CACurrentMediaTime())
             guard !key.characters.isEmpty else { return false }
             // Typing while an arrow is held hands the repeat to the new key,
@@ -237,6 +237,6 @@ final class TerminalHostView: UIView, UIKeyInput, UITextInputTraits {
     // MARK: - Command shortcuts
 
     override var keyCommands: [UIKeyCommand]? {
-        owner?.paneKeyCommands
+        owner?.cachedKeyCommands
     }
 }

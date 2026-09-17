@@ -60,11 +60,9 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     func applicationWillTerminate(_ application: UIApplication) {
-        // Give the shells a chance to hang up cleanly so that anything they
-        // started (a build, an editor) gets a SIGHUP rather than vanishing.
-        let root = window?.rootViewController as? RootViewController
-        root?.saveSessionState()
-        root?.prepareForTermination()
+        // The shells need nothing here: they are our children, and each one
+        // gets its SIGHUP when the process exits and its pty master closes.
+        (window?.rootViewController as? RootViewController)?.saveSessionState()
         ClipboardServer.shared.stop()
         endBackgroundTask()
     }

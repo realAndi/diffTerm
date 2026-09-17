@@ -53,6 +53,7 @@ struct Harness {
         menuAndSplitTests()
         scrollTests()
         suggestionTests()
+        historyStoreTests()
         blockPaneTests()
         blockLayoutTests()
         ghostTextPathTests()
@@ -68,9 +69,6 @@ struct Harness {
         colorSchemeTests()
         pathValidationTests()
         shellCompletionTests()
-        daemonTransportTests()
-        tmuxControlTests()
-        tmuxTransportTests()
         restoreMarkTests()
         liveSnapshotProbe()
         glyphPresentationTests()
@@ -372,6 +370,61 @@ struct Harness {
             expect(e.buffer.cursorY < 3, "cursor stays inside the grid after resize")
         }
 
+        // A change of width re-wraps text instead of cutting it off, and the
+        // cursor, the marks and wide characters all come along.
+        do {
+            let e = Emulator(cols: 40, rows: 6)
+            e.feed("0123456789abcdefghij0123456789\r\n$ echo hi")
+            e.resize(cols: 10, rows: 6)
+            expectEqual(e.buffer.lines[0].text(), "0123456789", "narrowing wraps a long line")
+            expect(e.buffer.lines[0].wrapped, "and marks the row as wrapped")
+            e.feed("X")
+            e.resize(cols: 40, rows: 6)
+            expect(e.buffer.lines[0].text().hasPrefix("0123456789abcdefghij0123456789"),
+                   "widening joins it back", e.buffer.lines[0].text())
+            expect(e.buffer.lines[1].text().hasPrefix("$ echo hiX"),
+                   "typing after a reflow lands where the cursor was", e.buffer.lines[1].text())
+
+            let wide = Emulator(cols: 5, rows: 4)
+            wide.feed("abcd日x")
+            wide.resize(cols: 20, rows: 4)
+            expect(wide.buffer.lines[0].text().hasPrefix("abcd日x"),
+                   "the blank a wide character left at the edge is not turned into a space",
+                   wide.buffer.lines[0].text())
+
+            let marks = Emulator(cols: 40, rows: 8)
+            marks.feed("\u{1B}]133;A\u{07}a-long-prompt$ \u{1B}]133;B\u{07}echo hello\r\n\u{1B}]133;C\u{07}hello\r\n\u{1B}]133;D;0\u{07}")
+            marks.resize(cols: 8, rows: 8)
+            if let block = marks.shellIntegration.blocks.first,
+               let start = block.commandStart,
+               let row = marks.absoluteRow(for: start.row) {
+                let line = marks.normal.row(at: row)
+                // At 8 columns the command itself wraps, so read on through
+                // the rows it continues onto.
+                var text = line.text(from: start.col)
+                var next = row
+                while marks.normal.row(at: next).wrapped, next + 1 < marks.normal.totalRows {
+                    next += 1
+                    text += marks.normal.row(at: next).text()
+                }
+                expect(start.col < line.count && text.hasPrefix("echo"),
+                       "a command's start follows its text through a reflow",
+                       text.debugDescription)
+            } else {
+                expect(false, "a command's start follows its text through a reflow", "no mark")
+            }
+
+            let saved = Emulator(cols: 30, rows: 6)
+            saved.feed("\u{1B}[44mblue\u{1B}[K\u{1B}[0m\r\nplain\r\n\u{1B}[?1049hfull screen")
+            saved.resize(cols: 12, rows: 6)
+            saved.feed("\u{1B}[?1049l")
+            saved.resize(cols: 1, rows: 3)
+            saved.resize(cols: 30, rows: 6)
+            let text = (0..<saved.normal.totalRows).map { saved.normal.row(at: $0).text() }.joined()
+            expect(text.contains("plain"),
+                   "leaving the alternate screen after a reflow restores a cursor that still points at the text")
+        }
+
         // Home resolution. On a rootless jailbreak the bootstrap's passwd
         // database is the one that matters; landing in the system /var/mobile
         // means no rc files, no ssh keys and no git config.
@@ -650,6 +703,14 @@ struct Harness {
             let line = first.lines[0].line(width: 30)
             expectEqual(line.text(to: line.trimmedLength), "green and plain", "the text survives")
             expectEqual(line[0].attrs.fg, e.buffer.lines[0][0].attrs.fg, "so does the colour")
+        }
+
+        // Older builds wrote one more key, `d`. A snapshot saved by one has to
+        // survive the upgrade, or the first launch after it restores nothing.
+        do {
+            let json = #"[{"title":"zsh","workingDirectory":"/var/jb/var/mobile","lines":[],"savedAt":0,"d":42}]"#
+            let decoded = try? JSONDecoder().decode([SessionSnapshot].self, from: Data(json.utf8))
+            expectEqual(decoded?.first?.title, "zsh", "a snapshot from an older build still decodes")
         }
 
         // A blank line encodes to nothing, which is what lets the tail be
@@ -1349,7 +1410,7 @@ struct Harness {
         let cache = GlyphCache(font: font)
         let white = Theme.RGB(255, 255, 255)
 
-        switch cache.entry(for: "⏺", style: .regular, color: white) {
+        switch cache.entry(for: "⏺", style: .regular) {
         case .line(let line, let width):
             var family = "<none>"
             if let runs = CTLineGetGlyphRuns(line) as? [CTRun], let run = runs.first,
@@ -1368,7 +1429,7 @@ struct Harness {
         }
 
         // A character that really is emoji keeps its colour.
-        switch cache.entry(for: "✅", style: .regular, color: white) {
+        switch cache.entry(for: "✅", style: .regular) {
         case .line(let line, _):
             var family = "<none>"
             if let runs = CTLineGetGlyphRuns(line) as? [CTRun], let run = runs.first,
@@ -1432,7 +1493,7 @@ struct Harness {
         // A prompt's glyphs must occupy one cell, or the grid tears.
         let font = TerminalFont(familyName: wanted, pointSize: 13, lineHeightScale: 1, scale: 3)
         let cache = GlyphCache(font: font)
-        if case .glyph = cache.entry(for: "\u{E0B0}", style: .regular, color: Theme.RGB(255, 255, 255)) {
+        if case .glyph = cache.entry(for: "\u{E0B0}", style: .regular) {
             expect(true, "powerline glyphs take the fast path, no fallback")
         } else {
             expect(false, "powerline glyphs take the fast path, no fallback")
@@ -1815,6 +1876,13 @@ struct Harness {
         ghost = Autosuggestion(full: "ls", buffer: "ls", source: .history)
         expect(ghost == nil, "a suggestion equal to the line is no suggestion")
 
+        // Emptying the line retires a suggestion made for typed text, so it
+        // cannot come back at a bare prompt; one made at a bare prompt stays.
+        var typedGhost = Autosuggestion(full: "rm -rf build", buffer: "rm -r", source: .history)
+        expect(typedGhost?.update(buffer: "") == false, "an emptied line drops a suggestion made for typed text")
+        var bareGhost = Autosuggestion(full: "git status", buffer: "", source: .history)
+        expect(bareGhost?.update(buffer: "") == true, "a suggestion made at an empty line survives it")
+
         // The validator's most important property: it must not over-reach.
         let validator = CommandValidator()
         expect(validator.isValid("git status", cwd: "/"), "a real command validates")
@@ -1824,6 +1892,168 @@ struct Harness {
                "an argument that is plainly a missing path fails")
         expect(validator.isValid("git checkout some-branch", cwd: "/"),
                "a bare word is a branch, not a missing file")
+
+        print("")
+    }
+
+    /// The history file off the main thread, and what that makes possible:
+    /// commands recorded before the file has been read, a clear that lands
+    /// while a save is queued, and the caches in front of the cascade.
+    ///
+    /// The timing of the load is not under the test's control, so every
+    /// check here is one that must hold however the race comes out.
+    static func historyStoreTests() {
+        print("history store")
+
+        let fm = FileManager.default
+        let root = NSTemporaryDirectory() + "diffterm-history-\(getpid())"
+        try? fm.removeItem(atPath: root)
+        defer { try? fm.removeItem(atPath: root) }
+        let path = root + "/history.jsonl"
+
+        func onDisk() -> [CommandRecord] {
+            guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .secondsSince1970
+            return text.split(separator: "\n").compactMap {
+                try? decoder.decode(CommandRecord.self, from: Data($0.utf8))
+            }
+        }
+
+        // A file big enough that reading it takes a while, written through a
+        // store so the format is the real one.
+        do {
+            let writer = CommandHistoryStore(path: path)
+            for n in 0..<5000 {
+                let id = writer.begin(command: "echo \(n)", pwd: "/work", shell: "zsh",
+                                      hostname: "test", session: "old")
+                writer.finish(id: id, exitCode: 0)
+            }
+            writer.flush()
+        }
+        expectEqual(onDisk().count, 5000, "a flush writes the history before returning")
+
+        // Recorded straight after opening, which is almost always before the
+        // file has been read.
+        let store = CommandHistoryStore(path: path)
+        let early = store.begin(command: "make test", pwd: "/work", shell: "zsh",
+                                hostname: "test", session: "new")
+        expectEqual(store.recent(matching: "make", pwd: "/work"), ["make test"],
+                    "a query while the file loads answers from what is known")
+        store.flush()
+        expect(store.isLoaded, "the file has loaded once the queue is idle")
+        expectEqual(store.count, 5001, "a command recorded during the load is kept alongside it")
+        expectEqual(store.allCommands(limit: 1), ["make test"], "and is newer than everything loaded")
+        store.finish(id: early, exitCode: 2)
+        expectEqual(store.record(id: early)?.command, "make test",
+                    "the id begin returned still names its own command")
+        expectEqual(store.record(id: early)?.exitCode, 2, "and closes that command out")
+        store.flush()
+        let saved = onDisk()
+        expectEqual(Set(saved.map(\.id)).count, saved.count, "ids stay unique after the merge")
+        expectEqual(saved.last?.command, "make test", "the merged command is saved last")
+        expect(saved.first?.command == "echo 0" && saved.first?.exitCode == 0,
+               "and the loaded history is untouched by closing it out")
+
+        // A clear before the file has loaded is not undone by the load.
+        let early2 = CommandHistoryStore(path: path)
+        early2.removeAll()
+        early2.flush()
+        expectEqual(early2.count, 0, "a clear during the load is not undone when it finishes")
+        expect(!fm.fileExists(atPath: path), "and the file is gone")
+
+        // A save already queued when the clear comes in must not write the
+        // old history back. Repeated, because it is a race.
+        var resurrected = 0
+        for round in 0..<20 {
+            let racing = CommandHistoryStore(path: path)
+            racing.flush()
+            for n in 0..<50 {
+                let id = racing.begin(command: "secret \(round) \(n)", pwd: "/work", shell: "zsh",
+                                      hostname: "test", session: "s")
+                racing.finish(id: id, exitCode: 0)
+            }
+            racing.save()
+            racing.removeAll()
+            racing.flush()
+            if fm.fileExists(atPath: path) || racing.count != 0 { resurrected += 1 }
+        }
+        expectEqual(resurrected, 0, "a clear wins over a save queued ahead of it")
+
+        let cleared = CommandHistoryStore(path: path)
+        let after = cleared.begin(command: "ls", pwd: "/work", shell: "zsh", hostname: "test", session: "s")
+        cleared.finish(id: after, exitCode: 0)
+        cleared.flush()
+        let reopened = CommandHistoryStore(path: path)
+        reopened.flush()
+        expectEqual(reopened.allCommands(), ["ls"], "what runs after a clear is saved as normal")
+
+        // The cascade judges each candidate once, however many steps offer it.
+        final class CountingValidator: CommandValidating {
+            var asked: [String: Int] = [:]
+            func isValid(_ command: String, cwd: String) -> Bool {
+                asked[command, default: 0] += 1
+                return false
+            }
+        }
+        final class CountingCompleter: CommandCompleting {
+            var calls = 0
+            func complete(line: String, cwd: String) -> String? {
+                calls += 1
+                return nil
+            }
+        }
+        let cargo = CommandHistoryStore(inMemory: true)
+        for (command, exit) in [("cargo build", 101), ("cargo test", 0), ("cargo build", 101),
+                                ("cargo test", 0), ("cargo build", 101), ("cargo bench", 0),
+                                ("cargo build", 101)] {
+            let id = cargo.begin(command: command, pwd: "/work", shell: "zsh",
+                                 hostname: "test", session: "s1")
+            cargo.finish(id: id, exitCode: exit)
+        }
+        let validator = CountingValidator()
+        let rejecting = NextCommandPredictor(store: cargo, validator: validator,
+                                             completer: CountingCompleter())
+        let none = rejecting.predict(NextCommandPredictor.Context(
+            lastCommand: "cargo build", lastExitCode: 101, pwd: "/work",
+            shell: "zsh", hostname: "test", prefix: "cargo "))
+        expect(none == nil, "every candidate rejected means no prediction")
+        expectEqual(validator.asked.count, 3, "all three candidates were considered")
+        expect(validator.asked.values.allSatisfy { $0 == 1 },
+               "and each was validated once, not once per step", "\(validator.asked)")
+
+        // The engine reuses its last answer while nothing it depends on has
+        // changed: the case of a prompt that redraws itself every second.
+        let prefs = Preferences.shared
+        let previous = prefs.commandSuggestions
+        prefs.commandSuggestions = true
+        defer { prefs.commandSuggestions = previous }
+
+        let memoStore = CommandHistoryStore(inMemory: true)
+        let counter = CountingCompleter()
+        let engine = SuggestionEngine(sessionKey: "memo", predictor: NextCommandPredictor(
+            store: memoStore, validator: AlwaysValid(), completer: counter))
+        let e = Emulator(cols: 40, rows: 6)
+        e.feed("\u{1B}]133;A\u{07}$ \u{1B}]133;B\u{07}qq")
+        engine.refresh(emulator: e, pwd: "/work", shell: "zsh")
+        engine.refresh(emulator: e, pwd: "/work", shell: "zsh")
+        expectEqual(counter.calls, 1, "an unchanged prompt reuses the last answer, even when it was none")
+        engine.refresh(emulator: e, pwd: "/elsewhere", shell: "zsh")
+        expectEqual(counter.calls, 2, "a different directory asks again")
+
+        let id = memoStore.begin(command: "qq --help", pwd: "/elsewhere", shell: "zsh",
+                                 hostname: "test", session: "other")
+        memoStore.finish(id: id, exitCode: 0)
+        engine.refresh(emulator: e, pwd: "/elsewhere", shell: "zsh")
+        expectEqual(engine.visibleSuffix, " --help", "a change to history asks again")
+
+        engine.dismiss()
+        engine.refresh(emulator: e, pwd: "/elsewhere", shell: "zsh")
+        expectEqual(engine.visibleSuffix, "", "a dismissed suggestion is not served back from the cache")
+        expectEqual(counter.calls, 3, "dismissing asks again")
+        e.feed("x")
+        engine.refresh(emulator: e, pwd: "/elsewhere", shell: "zsh")
+        expectEqual(counter.calls, 4, "typing asks again")
 
         print("")
     }
@@ -2961,374 +3191,6 @@ struct Harness {
         print("")
     }
 
-    /// The daemon client end to end: spawn the real sessiond binary, drive it
-    /// through DaemonTransport (the same client the app uses), and prove a
-    /// second transport with the same id reattaches to the still-running shell.
-    // MARK: - tmux control mode
-
-    /// The protocol parser, against bytes a real tmux 3.4 produced. Every
-    /// literal below was captured from the binary on this device rather than
-    /// written from the manual, because the two disagree in ways that matter:
-    /// tmux escapes a backslash as `\134`, not `\\`, and a killed window is
-    /// announced as `%unlinked-window-close`, not `%window-close`.
-    static func tmuxControlTests() {
-        print("tmux control mode")
-
-        func bytes(_ s: String) -> [UInt8] { Array(s.utf8) }
-        func string(_ b: [UInt8]) -> String { String(decoding: b, as: UTF8.self) }
-
-        // Unescaping. tmux writes every non-printable byte as three octal
-        // digits, so this is the only form there is.
-        expectEqual(string(TmuxControlParser.unescape(bytes(#"\033[1m"#))),
-                    "\u{1B}[1m", "an octal escape becomes the byte it names")
-        expectEqual(TmuxControlParser.unescape(bytes(#"a\000b"#)),
-                    [0x61, 0x00, 0x62], "a NUL survives, which is why this works in bytes")
-        expectEqual(string(TmuxControlParser.unescape(bytes(#"a\134b"#))),
-                    #"a\b"#, "a backslash arrives as an octal escape, not doubled")
-        expectEqual(TmuxControlParser.unescape(bytes(#"x\015\012y"#)),
-                    [0x78, 0x0D, 0x0A, 0x79], "CR and LF come back as themselves")
-        expectEqual(string(TmuxControlParser.unescape(bytes(#"\12"#))), #"\12"#,
-                    "two digits is not an escape, and the bytes are kept rather than dropped")
-        expectEqual(string(TmuxControlParser.unescape(bytes(#"end\"#))), #"end\"#,
-                    "a trailing backslash is kept")
-        expectEqual(string(TmuxControlParser.unescape(bytes(#"\400"#))), #"\400"#,
-                    "three octal digits can exceed a byte; that is text, not an escape")
-        expectEqual(TmuxControlParser.unescape(bytes("plain")), bytes("plain"),
-                    "text with nothing to unescape is unchanged")
-
-        // Framing.
-        var parser = TmuxControlParser()
-        var seen = parser.feed(bytes("%window-add @3\r\n"))
-        expectEqual(seen.count, 1, "a CRLF line is one notification")
-        expectEqual(seen.first, .windowAdd(window: "@3"), "and the CR is framing, not content")
-
-        // A chunk can split anywhere, including mid-escape, because this
-        // arrives over a pty in whatever size the kernel felt like.
-        parser = TmuxControlParser()
-        var pieces: [TmuxNotification] = []
-        for byte in bytes("%output %2 a\\033[1mb\r\n") {
-            pieces += parser.feed([byte])
-        }
-        expectEqual(pieces.count, 1, "a line split one byte at a time is still one notification")
-        expectEqual(pieces.first, .output(pane: "%2", bytes: bytes("a\u{1B}[1mb")),
-                    "and its payload is reassembled whole")
-
-        // The payload runs to the end of the line and is full of spaces — a
-        // prompt is mostly padding — so only the first separator separates.
-        parser = TmuxControlParser()
-        seen = parser.feed(bytes("%output %0 a b  c\r\n"))
-        expectEqual(seen.first, .output(pane: "%0", bytes: bytes("a b  c")),
-                    "spaces inside a payload are payload")
-
-        // Command blocks.
-        parser = TmuxControlParser()
-        seen = parser.feed(bytes("%begin 1789006884 279 1\r\n%0 1\r\n%1 0\r\n%end 1789006884 279 1\r\n"))
-        expectEqual(seen.count, 1, "a command block reports once, when it closes")
-        expectEqual(seen.first, .reply(number: 279, lines: ["%0 1", "%1 0"], isError: false),
-                    "a reply line starting with a percent is content, not a notification")
-
-        parser = TmuxControlParser()
-        seen = parser.feed(bytes("%begin 1 279 1\r\nparse error: unknown command: nope\r\n%error 1 279 1\r\n"))
-        expectEqual(seen.first, .reply(number: 279, lines: ["parse error: unknown command: nope"],
-                                       isError: true),
-                    "an error closes a block as a failure")
-
-        // Our own commands come back to us, because the pty echoes.
-        parser = TmuxControlParser()
-        seen = parser.feed(bytes("list-windows\r\n%sessions-changed\r\n"))
-        expectEqual(seen.count, 1, "an echoed command is ignored")
-        expectEqual(seen.first, .sessionsChanged, "and the notification after it still arrives")
-
-        // The notifications the tab list is built from.
-        parser = TmuxControlParser()
-        seen = parser.feed(bytes("%unlinked-window-close @1\r\n"))
-        expectEqual(seen.first, .windowClose(window: "@1"),
-                    "a killed window is announced as unlinked-window-close")
-        seen = parser.feed(bytes("%window-renamed @0 my shell\r\n"))
-        expectEqual(seen.first, .windowRenamed(window: "@0", name: "my shell"),
-                    "a window name may contain spaces")
-        seen = parser.feed(bytes("%layout-change @0 a87d,100x30,0,0,0 a87d,100x30,0,0,0 *\r\n"))
-        expectEqual(seen.first, .layoutChange(window: "@0",
-                                              layout: "a87d,100x30,0,0,0 a87d,100x30,0,0,0 *"),
-                    "a layout change keeps the whole layout")
-        seen = parser.feed(bytes("%exit\r\n"))
-        expectEqual(seen.first, .exit(reason: nil), "the server can leave without a reason")
-        seen = parser.feed(bytes("%exit server exited\r\n"))
-        expectEqual(seen.first, .exit(reason: "server exited"), "or with one")
-
-        // Commands. send-keys carries bytes as hex because a literal string
-        // would need every metacharacter of tmux's own parser escaped, and a
-        // pasted newline would run as a second command.
-        expectEqual(TmuxCommand.sendKeys(pane: "%0", bytes: [0x65, 0x0D]),
-                    "send-keys -t %0 -H 65 0d", "input goes as hex byte values")
-        expectEqual(TmuxCommand.refreshClient(cols: 100, rows: 30),
-                    "refresh-client -C 100x30", "resize goes through the client, not the pty")
-        expectEqual(TmuxCommand.refreshClient(cols: 0, rows: 0),
-                    "refresh-client -C 1x1", "a zero-sized window is refused rather than sent")
-
-        // A window has to start where the tab that asked for it is, or splits
-        // and new tabs opening in the current directory quietly stop working
-        // the moment tmux is switched on.
-        let made = TmuxCommand.newWindow(named: "dt-1", directory: "/var/mobile/Documents")
-        expect(made.contains("-c '/var/mobile/Documents'"),
-               "a new window is told where to start", made)
-        expect(!TmuxCommand.newWindow(named: "dt-1", directory: nil).contains(" -c "),
-               "and is told nothing when there is nothing to tell it")
-        expectEqual(TmuxCommand.quoted("a b"), "'a b'",
-                    "a path with a space stays one word")
-        expectEqual(TmuxCommand.quoted("it's"), "'it'\\''s'",
-                    "and a quote in a name cannot end the quoting")
-
-        // The exact opening bytes of a real attach, replayed.
-        parser = TmuxControlParser()
-        let opening = "%begin 1789006801 264 0\r\n%end 1789006801 264 0\r\n%window-add @0\r\n"
-            + "%sessions-changed\r\n%session-changed $0 probe\r\n%window-renamed @0 tmux\r\n"
-        let replayed = parser.feed(bytes(opening))
-        expectEqual(replayed.count, 5, "the real attach handshake parses end to end")
-        expectEqual(replayed.first, .reply(number: 264, lines: [], isError: false),
-                    "starting with an empty command block")
-        expect(replayed.contains(.sessionChanged(session: "$0", name: "probe")),
-               "and naming the session it attached to")
-
-        print("")
-    }
-
-    /// The transport against the tmux binary on this device. A parser that
-    /// passes invented tests and fails against real tmux is worse than none,
-    /// so this drives the real thing: attach, type, read it back, and prove a
-    /// shell outlives the client that started it.
-    static func tmuxTransportTests() {
-        print("tmux transport")
-
-        guard TmuxEnvironment.isInstalled else {
-            print("  · tmux is not installed — skipping"); print(""); return
-        }
-
-        // A socket of our own, so a failing check cannot disturb whatever the
-        // app itself has running. Short, because sun_path is 104 bytes and the
-        // bootstrap's own tmpdir resolves to 166.
-        let socket = "/private/var/tmp/diffterm-tmux-test-\(getpid()).sock"
-        let session = "difftermtest\(getpid())"
-        func killServer() {
-            var pid: pid_t = 0
-            let argv = [TmuxEnvironment.executable, "-S", socket, "kill-server"]
-            var cargv: [UnsafeMutablePointer<CChar>?] = argv.map { strdup($0) } + [nil]
-            var envp: [UnsafeMutablePointer<CChar>?] = [strdup("LC_CTYPE=UTF-8"), nil]
-            // Tidying up before and after is expected to fail the first time —
-            // there is no server yet — and tmux says so on stderr, in the
-            // middle of the checks. Send it nowhere.
-            var actions: posix_spawn_file_actions_t?
-            posix_spawn_file_actions_init(&actions)
-            posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0)
-            posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0)
-            if posix_spawn(&pid, TmuxEnvironment.executable, &actions, nil, &cargv, &envp) == 0 {
-                var st: Int32 = 0; waitpid(pid, &st, 0)
-            }
-            posix_spawn_file_actions_destroy(&actions)
-            cargv.forEach { free($0) }; envp.forEach { free($0) }
-        }
-        killServer()
-        defer { killServer(); try? FileManager.default.removeItem(atPath: socket) }
-
-        final class Sink { let lock = NSLock(); var bytes = [UInt8](); var exited: Int32? }
-        func pump(_ secs: TimeInterval) {
-            let end = Date().addingTimeInterval(secs)
-            while Date() < end { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
-        }
-
-        let env = ["PATH": "/var/jb/usr/bin:/var/jb/bin:/usr/bin:/bin",
-                   "HOME": UserEnvironment.home,
-                   "TERM": "xterm-256color"]
-
-        let sink = Sink()
-        let transport = TmuxTransport(socket: socket, session: session, windowName: "dt-one")
-        transport.onRead = { chunk in sink.lock.lock(); sink.bytes += chunk; sink.lock.unlock() }
-        transport.onExit = { code in sink.lock.lock(); sink.exited = code; sink.lock.unlock() }
-        do {
-            try transport.start(executable: TerminalSession.resolvedShell(),
-                                arguments: [], environment: env,
-                                workingDirectory: UserEnvironment.deviceHome,
-                                cols: 80, rows: 24)
-        } catch {
-            expect(false, "the transport attached", "\(error)"); print(""); return
-        }
-        func text() -> String {
-            sink.lock.lock(); defer { sink.lock.unlock() }
-            return String(decoding: sink.bytes, as: UTF8.self)
-        }
-
-        // The pane id has to arrive before anything can be sent anywhere.
-        let deadline = Date().addingTimeInterval(8)
-        while Date() < deadline, transport.paneID == nil { pump(0.1) }
-        expect(transport.paneID?.hasPrefix("%") == true,
-               "tmux named the pane this terminal is attached to",
-               transport.paneID ?? "nil")
-        guard transport.paneID != nil else { print(""); return }
-
-        // A shell prompt is output produced by a program inside tmux, relayed
-        // through control mode and unescaped — the whole path in one check.
-        // It arrives after the pane id, not with it: tmux answers the command
-        // that made the window before the shell in it has printed anything.
-        let printed = Date().addingTimeInterval(8)
-        while Date() < printed, text().isEmpty { pump(0.1) }
-        expect(!text().isEmpty, "a shell inside tmux produces output through the transport")
-
-        // Input goes in as hex and comes back as the command's result.
-        transport.write(Array("echo difftermworks\r".utf8))
-        let echoed = Date().addingTimeInterval(8)
-        while Date() < echoed, !text().contains("difftermworks\r\n") { pump(0.1) }
-        expect(text().contains("difftermworks"),
-               "typing reaches the shell and its output comes back",
-               String(text().suffix(60)).debugDescription)
-
-        // Resizing goes through refresh-client; tmux ignores the pty's winsize
-        // for a control-mode client, so this is the only thing that works.
-        transport.resize(cols: 100, rows: 30, pixelWidth: 0, pixelHeight: 0)
-        pump(0.8)
-        transport.write(Array("echo W=$(tput cols)\r".utf8))
-        let resized = Date().addingTimeInterval(8)
-        while Date() < resized, !text().contains("W=100") { pump(0.1) }
-        expect(text().contains("W=100"),
-               "the shell sees the new width after a resize",
-               String(text().suffix(80)).debugDescription)
-
-        // The point of the whole feature: leave something behind, drop the
-        // client, and find the same shell from a second one.
-        let marker = "/private/var/tmp/dtmux-\(getpid())"
-        transport.write(Array("touch \(marker); sleep 30\r".utf8))
-        pump(1.2)
-        transport.detach()
-        pump(0.5)
-
-        let sink2 = Sink()
-        let second = TmuxTransport(socket: socket, session: session, windowName: "dt-one")
-        second.onRead = { chunk in sink2.lock.lock(); sink2.bytes += chunk; sink2.lock.unlock() }
-        do {
-            try second.start(executable: TerminalSession.resolvedShell(),
-                             arguments: [], environment: env,
-                             workingDirectory: UserEnvironment.deviceHome,
-                             cols: 80, rows: 24)
-        } catch {
-            expect(false, "a second client attached", "\(error)"); print(""); return
-        }
-        let reattached = Date().addingTimeInterval(8)
-        while Date() < reattached, second.paneID == nil { pump(0.1) }
-        expect(second.paneID != nil, "a second client reattaches after the first went away")
-        expectEqual(second.paneID, transport.paneID,
-                    "and lands on the pane the first one left, not a new shell")
-
-        // The marker proves the command ran inside tmux, and the shell being
-        // there for the second client proves it survived losing the first.
-        expect(FileManager.default.fileExists(atPath: marker),
-               "the command ran inside the tmux session")
-        try? FileManager.default.removeItem(atPath: marker)
-
-        // Every control-mode client attached to a session shares its current
-        // window, so a transport that just asked "which pane is in front?"
-        // would hand every tab the same shell. A window of its own per tab is
-        // what prevents that.
-        let sink3 = Sink()
-        let other = TmuxTransport(socket: socket, session: session, windowName: "dt-two")
-        other.onRead = { chunk in sink3.lock.lock(); sink3.bytes += chunk; sink3.lock.unlock() }
-        try? other.start(executable: TerminalSession.resolvedShell(),
-                         arguments: [], environment: env,
-                         workingDirectory: UserEnvironment.deviceHome,
-                         cols: 80, rows: 24)
-        let separate = Date().addingTimeInterval(8)
-        while Date() < separate, other.paneID == nil { pump(0.1) }
-        expect(other.paneID != nil, "a second tab attaches too", other.paneID ?? "nil")
-        expect(other.paneID != nil && other.paneID != second.paneID,
-               "and gets a shell of its own rather than a second view of the first",
-               "\(other.paneID ?? "nil") vs \(second.paneID ?? "nil")")
-
-        other.terminate()
-        second.terminate()
-        pump(0.5)
-        print("")
-    }
-
-    static func daemonTransportTests() {
-        print("daemon transport")
-
-        let bin = "\(projectRoot)/build/diffTerm.app/sessiond"
-        guard FileManager.default.isExecutableFile(atPath: bin) else {
-            print("  · sessiond not built; run `make all` first — skipping"); print(""); return
-        }
-        let sock = NSTemporaryDirectory() + "diffterm-sd-\(getpid()).sock"
-        try? FileManager.default.removeItem(atPath: sock)
-
-        // Spawn the daemon.
-        var pid: pid_t = 0
-        let argv = [bin, sock]
-        var cargv: [UnsafeMutablePointer<CChar>?] = argv.map { strdup($0) } + [nil]
-        let spawned = posix_spawn(&pid, bin, nil, nil, &cargv, environ) == 0
-        cargv.forEach { free($0) }
-        expect(spawned, "the daemon spawned")
-        guard spawned else { print(""); return }
-        defer { kill(pid, SIGTERM); var st: Int32 = 0; waitpid(pid, &st, 0) }
-
-        let previousSocket = DaemonWire.socketPath
-        DaemonWire.socketPath = sock
-        defer { DaemonWire.socketPath = previousSocket }
-
-        // Wait for the socket to come up.
-        let up = Date().addingTimeInterval(3)
-        while Date() < up, !FileManager.default.fileExists(atPath: sock) { usleep(50_000) }
-        expect(DaemonSessionManager.shared.isAvailable == false || FileManager.default.fileExists(atPath: sock),
-               "the daemon is listening")
-
-        // A thread-safe sink for output the transport delivers.
-        final class Sink { let lock = NSLock(); var bytes = [UInt8](); var exited: Int32? = nil }
-        let sink = Sink()
-
-        let env = ["PATH=/var/jb/usr/bin:/usr/bin:/bin", "HOME=/var/jb/var/mobile"]
-        let script = "echo hello; sleep 2; echo world; sleep 4"
-
-        let t1 = DaemonTransport(sessionID: 7)
-        t1.onRead = { chunk in sink.lock.lock(); sink.bytes += chunk; sink.lock.unlock() }
-        do {
-            try t1.start(executable: "/var/jb/usr/bin/zsh",
-                         arguments: ["/var/jb/usr/bin/zsh", "-c", script],
-                         environment: Dictionary(uniqueKeysWithValues: env.map {
-                             let kv = $0.split(separator: "=", maxSplits: 1); return (String(kv[0]), String(kv[1])) }),
-                         workingDirectory: "/var/jb/var/mobile", cols: 80, rows: 24)
-        } catch { expect(false, "transport started", "\(error)"); print(""); return }
-
-        func pump(_ secs: TimeInterval) {
-            let end = Date().addingTimeInterval(secs)
-            while Date() < end { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
-        }
-        func text() -> String { sink.lock.lock(); defer { sink.lock.unlock() }; return String(decoding: sink.bytes, as: UTF8.self) }
-
-        pump(1.2)
-        expect(text().contains("hello"), "output streams through the transport", text().debugDescription)
-
-        // The daemon reports the session alive.
-        expect(DaemonSessionManager.shared.liveSessionIDs().contains(7),
-               "the session is listed as alive")
-
-        // Detach — the shell keeps running in the daemon.
-        t1.detach()
-        pump(2.0)   // 'world' is printed during this window, with nobody attached
-
-        // Reattach with the same id: the ring replay must include everything,
-        // including 'world' produced while detached.
-        let sink2 = Sink()
-        let t2 = DaemonTransport(sessionID: 7)
-        t2.onRead = { chunk in sink2.lock.lock(); sink2.bytes += chunk; sink2.lock.unlock() }
-        try? t2.start(executable: "/var/jb/usr/bin/zsh",
-                      arguments: ["/var/jb/usr/bin/zsh"], environment: [:],
-                      workingDirectory: "/var/jb/var/mobile", cols: 80, rows: 24)
-        pump(1.5)
-        let replay = { () -> String in sink2.lock.lock(); defer { sink2.lock.unlock() }; return String(decoding: sink2.bytes, as: UTF8.self) }()
-        expect(replay.contains("hello") && replay.contains("world"),
-               "reattaching replays the transcript, including output produced while detached",
-               replay.debugDescription.prefix(80).description)
-
-        t2.terminate()
-        print("")
-    }
-
     /// A suggestion (and the typed input) that wraps across two rows. Reported
     /// as: the ghost cuts off at the end of the first line instead of
     /// continuing on the next.
@@ -3441,9 +3303,9 @@ struct Harness {
         print("real shell wrap")
 
         let prefs = Preferences.shared
-        let pv = (prefs.commandSuggestions, prefs.persistentSessions, prefs.restoreSessions)
-        prefs.commandSuggestions = true; prefs.persistentSessions = false; prefs.restoreSessions = false
-        defer { (prefs.commandSuggestions, prefs.persistentSessions, prefs.restoreSessions) = pv }
+        let pv = (prefs.commandSuggestions, prefs.restoreSessions)
+        prefs.commandSuggestions = true; prefs.restoreSessions = false
+        defer { (prefs.commandSuggestions, prefs.restoreSessions) = pv }
         SessionStore.clear()
 
         let root = RootViewController()
@@ -4079,7 +3941,6 @@ final class ReplyRecorder: EmulatorDelegate {
     func emulator(_ emulator: Emulator, didSetWorkingDirectory path: String) {}
     func emulator(_ emulator: Emulator, didRequestClipboardWrite text: String) { clipboard = text }
     func emulator(_ emulator: Emulator, didPostNotification title: String, body: String) {}
-    func emulator(_ emulator: Emulator, didScrollBy lines: Int) {}
     func emulatorPaletteDidChange(_ emulator: Emulator) {}
     func emulatorShellIntegrationDidChange(_ emulator: Emulator) {}
 }

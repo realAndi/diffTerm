@@ -45,11 +45,11 @@ jobs:
          A terminal emulator for jailbroken iOS, built from source in this
          repository.
          .
-         Shells are owned by a launchd daemon rather than the app, so
-         backgrounding or force-quitting diffTerm kills nothing; a reopened
-         tab reattaches and replays what it missed. The emulator implements
-         the DEC VT500 state machine, 24-bit colour, mouse reporting, Sixel
-         and iTerm2 inline images, and OSC 133 command blocks.
+         Shells run inside the app and end with it; each tab's screen is
+         saved when iOS reclaims the app and comes back on relaunch. The
+         emulator implements the DEC VT500 state machine, 24-bit colour,
+         mouse reporting, Sixel and iTerm2 inline images, and OSC 133
+         command blocks.
       # The Makefile cross-builds with Xcode's iPhoneOS SDK on a Mac; ldid
       # signs everything. No Go anywhere -- go-version stays unset.
       brew-packages: ldid

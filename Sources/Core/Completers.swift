@@ -84,7 +84,8 @@ struct CommandCompleter: CommandCompleting {
 ///
 /// Enumerated once and cached: PATH almost never changes within a session,
 /// and a stat of every directory on it per keystroke is not free. Refreshed
-/// after a few minutes so a freshly installed tool still turns up.
+/// after a few minutes — in the background, with the stale set serving
+/// meanwhile — so a freshly installed tool still turns up.
 final class PathCompleter {
 
     static let shared = PathCompleter()
@@ -92,7 +93,11 @@ final class PathCompleter {
     private var names: [String] = []
     private var builtAt: Date?
     private let lifetime: TimeInterval = 300
+    private var isRefreshing = false
+    /// Bumped by `invalidate`, so a scan that began before it cannot land.
+    private var generation = 0
     private let lock = NSLock()
+    private let refreshQueue = DispatchQueue(label: "dev.diffterm.pathcompleter", qos: .utility)
 
     /// Directories searched, in order. The bootstrap's own list is the
     /// fallback, because the app's environment is not the shell's: the
@@ -125,7 +130,13 @@ final class PathCompleter {
     func complete(prefix: String) -> String? {
         guard !prefix.isEmpty else { return nil }
         lock.lock()
-        if builtAt == nil || Date().timeIntervalSince(builtAt!) > lifetime { rebuild() }
+        if names.isEmpty {
+            // Builtins keep the set non-empty after the first build.
+            names = rebuild()
+            builtAt = Date()
+        } else if builtAt == nil || Date().timeIntervalSince(builtAt!) > lifetime {
+            refreshInBackground()
+        }
         let candidates = names
         lock.unlock()
 
@@ -137,24 +148,41 @@ final class PathCompleter {
             .min { ($0.count, $0) < ($1.count, $1) }
     }
 
-    private func rebuild() {
+    /// Called with `lock` held. Scan without it so typing can use stale names.
+    private func refreshInBackground() {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        let started = generation
+        refreshQueue.async {
+            let refreshed = self.rebuild()
+            self.lock.lock()
+            // An `invalidate` since the scan began wins: the scan may predate
+            // the change, and the next lookup rebuilds synchronously anyway.
+            if self.generation == started {
+                self.names = refreshed
+                self.builtAt = Date()
+            }
+            self.isRefreshing = false
+            self.lock.unlock()
+        }
+    }
+
+    private func rebuild() -> [String] {
         let fm = FileManager.default
         var found = Set(PathCompleter.builtins)
         for directory in PathCompleter.directories {
             guard let entries = try? fm.contentsOfDirectory(atPath: directory) else { continue }
             for entry in entries where !entry.hasPrefix(".") {
-                // One stat per entry, once every five minutes. Fine.
                 if fm.isExecutableFile(atPath: directory + "/" + entry) { found.insert(entry) }
             }
         }
-        names = Array(found)
-        builtAt = Date()
+        return Array(found)
     }
 
-    /// Forces the next lookup to re-scan. For tests, and for the installer
-    /// once it has put something new on PATH.
+    /// Forces the next lookup to re-scan, synchronously, so what was just put
+    /// on PATH is there straight away. For tests, and for the installer.
     func invalidate() {
-        lock.lock(); builtAt = nil; lock.unlock()
+        lock.lock(); generation += 1; names = []; builtAt = nil; lock.unlock()
     }
 }
 

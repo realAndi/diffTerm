@@ -108,6 +108,8 @@ final class SpecStore {
     var directory: String
 
     private var cache: [String: CompletionSpec?] = [:]
+    /// Least recently used first, including cached misses.
+    private var order: [String] = []
     private let lock = NSLock()
 
     init(directory: String? = nil) {
@@ -115,17 +117,30 @@ final class SpecStore {
     }
 
     /// The spec for a command, or nil when there is none — cached either way,
-    /// so an unknown command costs one failed `stat` per session rather than
-    /// one per keystroke.
+    /// so an unknown command is not re-read until its entry is evicted.
     func spec(for command: String) -> CompletionSpec? {
         lock.lock()
         defer { lock.unlock() }
-        if let cached = cache[command] { return cached }
+        if let cached = cache[command] {
+            touch(command)
+            return cached
+        }
 
         let loaded = load(command)
-        if cache.count > 48 { cache.removeAll(keepingCapacity: true) }
-        cache[command] = loaded
+        if cache.count > 48 {
+            // Keep the other entries, including misses, warm.
+            let lru = order.removeFirst()
+            cache.removeValue(forKey: lru)
+        }
+        cache[command] = .some(loaded)
+        touch(command)
         return loaded
+    }
+
+    /// Marks a command as just used, under the caller's lock.
+    private func touch(_ command: String) {
+        order.removeAll { $0 == command }
+        order.append(command)
     }
 
     private func load(_ command: String) -> CompletionSpec? {

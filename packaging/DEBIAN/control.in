@@ -20,9 +20,9 @@ Description: A different terminal to use
  regions, mouse reporting, Sixel and iTerm2 inline images. Conformance is
  measured with esctest rather than claimed.
  .
- Shells are owned by a launchd daemon, not the app, so backgrounding or
- force-quitting diffTerm does not kill what is running; a reopened tab
- reattaches and replays what it missed.
+ Shells run inside the app and end with it. When iOS reclaims diffTerm in
+ the background, each tab's screen is saved and comes back on relaunch,
+ marked so old output is not mistaken for a live shell.
  .
  OSC 133 shell integration marks every command, so you can jump between
  prompts, copy one command's output, and see exit codes and run times.

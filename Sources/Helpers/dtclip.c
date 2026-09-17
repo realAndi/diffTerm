@@ -21,6 +21,7 @@
 // process holding a socket the app handed out, which the app can gate.
 
 #include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -268,6 +269,10 @@ int main(int argc, char **argv) {
     const char *base = argc > 0 && argv[0] != NULL ? strrchr(argv[0], '/') : NULL;
     base = base != NULL ? base + 1 : (argc > 0 && argv[0] != NULL ? argv[0] : "pbcopy");
     progname = base;
+
+    /* A connection the app closes early must be an error return we can
+       report, not a silent death by SIGPIPE with exit status 141. */
+    signal(SIGPIPE, SIG_IGN);
 
     if (argc > 1 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
         printf("usage: pbcopy < file      copy stdin to the iOS clipboard\n"

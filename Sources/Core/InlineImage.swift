@@ -110,6 +110,11 @@ struct InlineImageStore {
 
     // MARK: - Forgetting
 
+    /// Moves every picture to where its top row went in a reflow.
+    mutating func remap(row: (Int) -> Int) {
+        for i in images.indices { images[i].stableRow = row(images[i].stableRow) }
+    }
+
     /// Drops pictures whose rows have aged out of scrollback entirely. Called
     /// wherever the shell-integration marks are pruned, and for the same
     /// reason: the text they were drawn against is gone.

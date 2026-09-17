@@ -53,13 +53,30 @@ final class RootViewController: UIViewController {
     /// during output; coalesce so a fast script does not rebuild the tab bar
     /// once per prompt.
     @objc private func commandStateChanged() {
+        scheduleTabBarRefresh()
+    }
+
+    /// Coalesce title and command updates so bursts share one tab bar rebuild.
+    private func scheduleTabBarRefresh() {
         guard !tabBarRefreshScheduled else { return }
         tabBarRefreshScheduled = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             guard let self else { return }
             self.tabBarRefreshScheduled = false
             self.refreshTabBar()
+            self.updateIdleTimer()
         }
+    }
+
+    /// Prevent automatic locking from suspending a running local command.
+    private func updateIdleTimer() {
+        let anyRunning = tabs.contains { tab in
+            tab.panes.contains { pane in
+                pane.session.emulator.shellIntegration.last?.isRunning == true
+            }
+        }
+        UIApplication.shared.isIdleTimerDisabled =
+            Preferences.shared.keepScreenAwakeWhileRunning && anyRunning
     }
 
     @objc private func applicationDidBecomeActive() {
@@ -136,14 +153,8 @@ final class RootViewController: UIViewController {
             addTab(activate: true)
             return
         }
-        // Ask the daemon which of the saved sessions are still alive, so
-        // those tabs reattach to a running shell (and skip restoring the
-        // stale screen) while the rest restore from the snapshot as before.
-        let live = Preferences.shared.persistentSessions
-            ? DaemonSessionManager.shared.liveSessionIDs() : []
         for snapshot in snapshots {
-            let isLive = snapshot.daemonSessionID != 0 && live.contains(snapshot.daemonSessionID)
-            addTab(activate: false, restoring: snapshot, reattachLive: isLive)
+            addTab(activate: false, restoring: snapshot)
         }
         selectTab(at: 0)
     }
@@ -161,7 +172,6 @@ final class RootViewController: UIViewController {
 
     @discardableResult
     func addTab(activate: Bool, restoring snapshot: SessionSnapshot? = nil,
-                reattachLive: Bool = false,
                 inheriting directory: String? = nil) -> SplitContainerController {
         let size = containerView.bounds.size == .zero ? view.bounds.size : containerView.bounds.size
         // The real geometry arrives on first layout; this just keeps the shell
@@ -170,10 +180,8 @@ final class RootViewController: UIViewController {
                                       rows: max(5, Int(size.height / 17)),
                                       inheriting: directory)
         // Before the pane exists, so the restored history is already in
-        // scrollback when the shell writes its first prompt. A tab reattaching
-        // to a live daemon session skips the saved screen — the daemon replays
-        // the live one — but still takes the session id and directory.
-        if let snapshot { session.restore(from: snapshot, includeScreen: !reattachLive) }
+        // scrollback when the shell writes its first prompt.
+        if let snapshot { session.restore(from: snapshot) }
 
         let pane = TerminalPaneController(session: session)
         let tab = SplitContainerController(initialPane: pane)
@@ -225,6 +233,8 @@ final class RootViewController: UIViewController {
             tab.view.removeFromSuperview()
             tab.removeFromParent()
             self.tabs.remove(at: currentIndex)
+            // The closed tab may have been the one keeping the screen awake.
+            self.updateIdleTimer()
 
             if self.tabs.isEmpty {
                 self.addTab(activate: true)
@@ -265,17 +275,6 @@ final class RootViewController: UIViewController {
         setNeedsStatusBarAppearanceUpdate()
     }
 
-    /// The app is terminating. Daemon-backed sessions are *detached* so their
-    /// shells keep running for next launch; only a session that cannot survive
-    /// the app going away is stopped.
-    func prepareForTermination() {
-        for tab in tabs {
-            for pane in tab.panes where pane.session.isRunning {
-                pane.session.detachKeepingAlive()
-            }
-        }
-    }
-
     // MARK: - Settings
 
     func presentSettings() {
@@ -300,6 +299,7 @@ final class RootViewController: UIViewController {
         setNeedsStatusBarAppearanceUpdate()
         view.setNeedsLayout()
         refreshAppIcon()
+        updateIdleTimer()
     }
 
     override func traitCollectionDidChange(_ previous: UITraitCollection?) {
@@ -468,6 +468,8 @@ extension RootViewController: SplitContainerDelegate {
         container.view.removeFromSuperview()
         container.removeFromParent()
         tabs.remove(at: index)
+        // The closed tab may have been the one keeping the screen awake.
+        updateIdleTimer()
         if tabs.isEmpty {
             addTab(activate: true)
         } else {
@@ -477,7 +479,7 @@ extension RootViewController: SplitContainerDelegate {
 
     func splitContainer(_ container: SplitContainerController, didUpdateTitle title: String) {
         guard tabs.contains(container) else { return }
-        refreshTabBar()
+        scheduleTabBarRefresh()
     }
 
     func splitContainerDidRequestNewTab(_ container: SplitContainerController) {

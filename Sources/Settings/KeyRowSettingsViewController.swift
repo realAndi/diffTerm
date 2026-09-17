@@ -28,8 +28,8 @@ final class KeyRowSettingsViewController: SettingsTableViewController {
     private func builtInSection() -> SettingsSection {
         let rows: [SettingsRow] = KeyRowView.toggleableKeys.map { key in
             .toggle(title: key.name,
-                    get: { !self.prefs.hiddenKeyRowKeys.contains(key.id) },
-                    set: { shown in
+                    get: { [unowned self] in !self.prefs.hiddenKeyRowKeys.contains(key.id) },
+                    set: { [unowned self] shown in
                         var hidden = self.prefs.hiddenKeyRowKeys
                         if shown { hidden.remove(key.id) } else { hidden.insert(key.id) }
                         self.prefs.hiddenKeyRowKeys = hidden
@@ -43,21 +43,22 @@ final class KeyRowSettingsViewController: SettingsTableViewController {
 
     private func customSection() -> SettingsSection {
         var rows: [SettingsRow] = prefs.customKeys.enumerated().map { index, key in
-            .disclosure(title: key.title, detail: key.summary, action: { [weak self] _ in
-                self?.editCustomKey(at: index)
+            .disclosure(title: key.title, detail: key.summary, action: { [unowned self] _ in
+                self.editCustomKey(at: index)
             })
         }
-        rows.append(.button(title: "Add Combination", destructive: false, action: { [weak self] _ in
-            self?.addCustomKey()
+        rows.append(.button(title: "Add Combination", destructive: false, action: { [unowned self] _ in
+            self.addCustomKey()
         }))
         if !prefs.customKeys.isEmpty {
-            rows.append(.button(title: "Remove All", destructive: true, action: { [weak self] host in
+            rows.append(.button(title: "Remove All", destructive: true, action: { [unowned self] host in
                 let alert = UIAlertController(title: "Remove all custom keys?",
                                               message: nil, preferredStyle: .alert)
                 alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-                alert.addAction(UIAlertAction(title: "Remove", style: .destructive) { _ in
-                    self?.prefs.customKeys = []
-                    self?.rebuild()
+                alert.addAction(UIAlertAction(title: "Remove", style: .destructive) { [weak self] _ in
+                    guard let self else { return }
+                    self.prefs.customKeys = []
+                    self.rebuild()
                 })
                 host.present(alert, animated: true)
             }))
@@ -87,8 +88,9 @@ final class KeyRowSettingsViewController: SettingsTableViewController {
         let alert = UIAlertController(
             title: existing == nil ? "New Combination" : "Edit Combination",
             message: "Modifiers: any of ctrl, alt, shift, separated by spaces or plus signs.\n"
-                   + "Key: a single character, or one of "
-                   + "esc tab up down left right home end pageUp pageDown insert delete f1–f12.",
+                   + "Key: a single character, or a name (case-insensitive): "
+                   + "escape/esc tab enter/return up down left right home end "
+                   + "pageUp/pgup pageDown/pgdn insert/ins delete/del backspace/bksp f1–f12.",
             preferredStyle: .alert)
 
         alert.addTextField { field in
@@ -121,8 +123,8 @@ final class KeyRowSettingsViewController: SettingsTableViewController {
                 self.rebuild()
             })
         }
-        alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak self] _ in
-            guard let self else { return }
+        alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak self, weak alert] _ in
+            guard let self, let alert else { return }
             let fields = alert.textFields ?? []
             let label = (fields.first?.text ?? "").trimmingCharacters(in: .whitespaces)
             let modifierText = fields.count > 1 ? (fields[1].text ?? "") : ""
@@ -159,7 +161,11 @@ final class KeyRowSettingsViewController: SettingsTableViewController {
         }
 
         guard !key.isEmpty else { return nil }
-        let special = SpecialKeyID(rawValue: key) ?? SpecialKeyID(rawValue: key.lowercased())
+        let aliases = ["esc": "escape", "return": "enter", "del": "delete",
+                       "bksp": "backspace", "pgup": "pageup", "pgdn": "pagedown",
+                       "ins": "insert"]
+        let name = aliases[key.lowercased()] ?? key.lowercased()
+        let special = SpecialKeyID.allCases.first { $0.rawValue.lowercased() == name }
         if special == nil && key.count != 1 { return nil }
 
         let title = label.isEmpty

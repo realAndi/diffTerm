@@ -37,12 +37,9 @@ magic=$(head -c 4 "$PAYLOAD/diffTerm.app/diffTerm" | od -An -tx1 | tr -d ' \n')
 
 STAGING="$(mktemp -d)"
 trap 'rm -rf "$STAGING"' EXIT
-mkdir -p "$STAGING/DEBIAN" \
-    "$STAGING/var/jb/Applications" \
-    "$STAGING/var/jb/Library/LaunchDaemons"
+mkdir -p "$STAGING/DEBIAN" "$STAGING/var/jb/Applications"
 
 cp -R "$PAYLOAD/diffTerm.app" "$STAGING/var/jb/Applications/diffTerm.app"
-cp "$PAYLOAD/dev.diffterm.sessiond.plist" "$STAGING/var/jb/Library/LaunchDaemons/"
 
 # The artifact boundary does not preserve POSIX permissions: upload-artifact
 # zips the payload and every file comes back 0644 no matter how it was
@@ -50,15 +47,13 @@ cp "$PAYLOAD/dev.diffterm.sessiond.plist" "$STAGING/var/jb/Library/LaunchDaemons
 # here, explicitly, and then verified — a wrong mode fails this build
 # instead of failing on someone's home screen.
 APP_STAGING="$STAGING/var/jb/Applications/diffTerm.app"
-chmod 755 "$APP_STAGING/diffTerm" "$APP_STAGING/sessiond"
+chmod 755 "$APP_STAGING/diffTerm"
 find "$APP_STAGING/helpers" -type f -exec chmod 755 {} +
-for bin in diffTerm sessiond helpers/pbcopy helpers/pbpaste; do
+for bin in diffTerm helpers/pbcopy helpers/pbpaste; do
     [ -x "$APP_STAGING/$bin" ] \
         || { echo "not executable after staging: $bin"; exit 1; }
 done
 
-# Same layout as the app bundle, so deleting the package takes its daemon
-# config with it and installing registers it (postinst).
 sed -e "s|@VERSION@|$PKGVER|g" \
     -e "s|@REPO@|$GH_REPO|g" \
     -e "s|@PAGES@|$GH_PAGES|g" \

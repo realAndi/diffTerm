@@ -20,7 +20,11 @@ final class SnippetsViewController: UITableViewController {
             UIBarButtonItem(barButtonSystemItem: .add, target: self, action: #selector(addSnippet)),
             editButtonItem,
         ]
-        if snippets.isEmpty { seedDefaults() }
+        if !Preferences.shared.snippetsSeeded {
+            if snippets.isEmpty { seedDefaults() }
+            // Existing lists count too; an emptied list must stay empty.
+            Preferences.shared.snippetsSeeded = true
+        }
     }
 
     /// A brand new install with an empty list looks broken; these are the
@@ -88,10 +92,10 @@ final class SnippetsViewController: UITableViewController {
         presentEditor(for: index)
     }
 
-    private func presentEditor(for index: Int?) {
-        let existing = index.map { snippets[$0] }
+    private func presentEditor(for index: Int?, draft: Snippet? = nil) {
+        let existing = draft ?? index.map { snippets[$0] }
         let alert = UIAlertController(
-            title: existing == nil ? "New Snippet" : "Edit Snippet",
+            title: index == nil ? "New Snippet" : "Edit Snippet",
             message: nil, preferredStyle: .alert)
 
         alert.addTextField { field in
@@ -108,20 +112,20 @@ final class SnippetsViewController: UITableViewController {
             field.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
         }
 
-        var runsImmediately = existing?.runsImmediately ?? true
+        let runsImmediately = existing?.runsImmediately ?? true
         alert.addAction(UIAlertAction(title: runsImmediately ? "Press Return: On" : "Press Return: Off",
-                                      style: .default) { [weak self] _ in
-            // Toggling reopens the editor with the flag flipped, which keeps
-            // this to one alert instead of a whole form screen.
-            runsImmediately.toggle()
-            let title = alert.textFields?[0].text ?? ""
-            let command = alert.textFields?[1].text ?? ""
-            self?.reopenEditor(index: index, title: title, command: command, runs: runsImmediately)
+                                      style: .default) { [weak self, weak alert] _ in
+            guard let self, let alert else { return }
+            // Keep toggles in the draft so Cancel leaves the saved list alone.
+            let draft = Snippet(title: alert.textFields?[0].text ?? "",
+                                command: alert.textFields?[1].text ?? "",
+                                runsImmediately: !runsImmediately)
+            self.presentEditor(for: index, draft: draft)
         })
 
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak self] _ in
-            guard let self else { return }
+        alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak self, weak alert] _ in
+            guard let self, let alert else { return }
             let title = (alert.textFields?[0].text ?? "").trimmingCharacters(in: .whitespaces)
             let command = alert.textFields?[1].text ?? ""
             guard !command.isEmpty else { return }
@@ -138,19 +142,5 @@ final class SnippetsViewController: UITableViewController {
         })
 
         present(alert, animated: true)
-    }
-
-    private func reopenEditor(index: Int?, title: String, command: String, runs: Bool) {
-        let snippet = Snippet(title: title, command: command, runsImmediately: runs)
-        if let index {
-            snippets[index] = snippet
-            persist()
-            presentEditor(for: index)
-        } else {
-            snippets.append(snippet)
-            persist()
-            tableView.reloadData()
-            presentEditor(for: snippets.count - 1)
-        }
     }
 }

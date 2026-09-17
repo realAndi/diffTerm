@@ -41,4 +41,10 @@ int dt_signal_foreground(int master, pid_t fallback_pid, int sig);
 /// pid of the pty's foreground process group, or -1.
 pid_t dt_foreground_pid(int master);
 
+/// 1 if `pid` is a child that has not exited yet, 0 if it has exited (reaped
+/// or not) or is not our child. Never reaps, so it is safe to ask while
+/// someone else owns the `waitpid`. An unreaped child's pid cannot be reused,
+/// which is what makes a signal sent after a 1 here reach the right process.
+int dt_child_running(pid_t pid);
+
 #endif

@@ -9,7 +9,11 @@ import Foundation
 /// - Typing that agrees with the suggestion **shrinks** it rather than
 ///   recomputing it. That is what keeps it from flickering as it is typed out.
 /// - Typing that diverges hides it but keeps it, so backing up brings it back
-///   without another lookup.
+///   without another lookup. A hidden suggestion gives way to a fresh
+///   prediction for the line as it now stands.
+/// - Emptying the line drops a suggestion that was made for typed text, so
+///   it cannot reappear in full at an empty prompt and bypass the stricter
+///   rules the predictor applies with no prefix.
 /// - Visible ghost text is never swapped for different ghost text. A
 ///   suggestion that changes under the cursor is unreadable.
 struct Autosuggestion: Equatable {
@@ -43,6 +47,13 @@ struct Autosuggestion: Equatable {
     /// it, or matched it exactly — and the caller should drop it and look
     /// again.
     mutating func update(buffer: String) -> Bool {
+        // An emptied line drops a suggestion that was made for typed text:
+        // otherwise it would reappear in full at the prompt, dodging the
+        // stricter rules the predictor applies with no prefix. One computed
+        // at an empty line keeps working as before.
+        if buffer.isEmpty && !snapshot.isEmpty {
+            return false
+        }
         if buffer == full {
             // Fully typed out by hand. Nothing left to offer.
             return false

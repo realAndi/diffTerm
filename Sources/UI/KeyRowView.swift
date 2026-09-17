@@ -20,8 +20,10 @@ enum KeyRowBase: Equatable {
 
 /// A serialisable stand-in for `SpecialKey`, which carries an associated value
 /// and so is awkward to put in a table.
-enum SpecialKeyID: String {
-    case escape, tab, up, down, left, right
+enum SpecialKeyID: String, CaseIterable {
+    // Enter goes through `SpecialKey.enter`, as the Return key does, rather
+    // than as a typed carriage return that skips what sending a key clears.
+    case escape, tab, enter, up, down, left, right
     case home, end, pageUp, pageDown, insert, delete, backspace
     case f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12
 
@@ -29,6 +31,7 @@ enum SpecialKeyID: String {
         switch self {
         case .escape: return .escape
         case .tab: return .tab
+        case .enter: return .enter
         case .up: return .up
         case .down: return .down
         case .left: return .left

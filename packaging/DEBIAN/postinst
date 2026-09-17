@@ -1,12 +1,35 @@
 #!/bin/sh
-# postinst: register the app and load the session daemon.
+# postinst: register the app, and clear out what older versions left running.
 #
-# diffterm-sessiond owns each shell's pty from outside the app's process
-# coalition, which is why backgrounding or force-quitting diffTerm does not
-# kill what is running. It ships in the bundle; this loads it. Idempotent:
-# bootout first so an upgrade re-bootstraps rather than erroring.
-PLIST=/var/jb/Library/LaunchDaemons/dev.diffterm.sessiond.plist
-launchctl bootout system "$PLIST" 2>/dev/null
-launchctl bootstrap system "$PLIST" 2>/dev/null || launchctl load -w "$PLIST" 2>/dev/null
-uicache -p /var/jb/Applications/diffTerm.app
+# Earlier versions installed a launchd daemon, sessiond, that could own the
+# shells so they outlived the app. It is gone: shells are the app's children
+# and end with it. An upgrade deletes the old plist and binary with the old
+# package, but launchd can still have the job loaded and the process can
+# still be running, so both are stopped here. The shells it owned are its pty
+# children and get SIGHUP as it exits and their masters close. Every step is
+# idempotent and ignores failure, so a fresh install runs through harmlessly.
+APP=/var/jb/Applications/diffTerm.app
+
+# Fixed, not $APP: the old plist only ever pointed at this bundle.
+LABEL=dev.diffterm.sessiond
+PLIST=/var/jb/Library/LaunchDaemons/$LABEL.plist
+BIN=/var/jb/Applications/diffTerm.app/sessiond
+SOCK="/var/jb/var/mobile/Library/Application Support/diffTerm/sessiond.sock"
+
+# By label first: dpkg may already have deleted the plist the path forms read.
+launchctl bootout "system/$LABEL" 2>/dev/null \
+    || launchctl bootout system "$PLIST" 2>/dev/null \
+    || launchctl unload "$PLIST" 2>/dev/null
+rm -f "$PLIST"
+
+# A copy launchd no longer tracks, such as one started by hand. Matched on its
+# full path, so nothing else that happens to be called sessiond is touched.
+ps -A -o pid= -o command= 2>/dev/null | while read -r pid command; do
+    case "$command" in
+        "$BIN"|"$BIN "*) kill "$pid" 2>/dev/null ;;
+    esac
+done
+rm -f "$SOCK"
+
+uicache -p "$APP"
 exit 0

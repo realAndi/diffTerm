@@ -22,6 +22,11 @@ struct GitRefCompleter {
     /// offered: `git switch -c foo` is naming something that does not exist.
     private static let createFlags: Set<String> = ["-b", "-B", "-c", "-C", "--orphan"]
 
+    /// Command wrappers that just pass through to the real command. A `static
+    /// let`: the set never changes, so rebuilding it on every keystroke was
+    /// pure waste.
+    private static let wrappers: Set<String> = ["sudo", "time", "env", "exec", "nohup", "nice", "command"]
+
     func complete(line: String, cwd: String) -> String? {
         guard !line.contains("\""), !line.contains("'") else { return nil }
         let endsWithSpace = line.hasSuffix(" ")
@@ -30,8 +35,7 @@ struct GitRefCompleter {
         guard !partial.isEmpty, !partial.hasPrefix("-") else { return nil }
 
         var i = 0
-        let wrappers: Set<String> = ["sudo", "time", "env", "exec", "nohup", "nice", "command"]
-        while i < tokens.count, wrappers.contains(tokens[i]) { i += 1 }
+        while i < tokens.count, GitRefCompleter.wrappers.contains(tokens[i]) { i += 1 }
         guard i < tokens.count, (tokens[i] as NSString).lastPathComponent == "git" else { return nil }
 
         let rest = Array(tokens[(i + 1)...])
@@ -89,11 +93,23 @@ struct GitRefCompleter {
 
     /// Local branch names, from loose refs and the packed-refs file.
     func branches(in gitDir: String) -> [String] {
+        // A linked worktree keeps per-worktree state in its git dir but the
+        // branch refs in the common one, named by a `commondir` file (relative
+        // or absolute). Without this, branches created elsewhere never show up
+        // in a worktree's completions.
+        var refsDir = gitDir
+        if let contents = try? String(contentsOfFile: gitDir + "/commondir", encoding: .utf8) {
+            let path = contents.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !path.isEmpty {
+                refsDir = path.hasPrefix("/") ? path : gitDir + "/" + path
+            }
+        }
+
         var names = Set<String>()
 
         // Loose refs: every file under refs/heads, nested names included
         // (refs/heads/feature/x → feature/x).
-        let headsRoot = gitDir + "/refs/heads"
+        let headsRoot = refsDir + "/refs/heads"
         if let enumerator = fileManager.enumerator(atPath: headsRoot) {
             for case let relative as String in enumerator {
                 var isDir: ObjCBool = false
@@ -105,7 +121,7 @@ struct GitRefCompleter {
         }
 
         // Packed refs: lines like `<sha> refs/heads/<name>`.
-        if let packed = try? String(contentsOfFile: gitDir + "/packed-refs", encoding: .utf8) {
+        if let packed = try? String(contentsOfFile: refsDir + "/packed-refs", encoding: .utf8) {
             for line in packed.split(separator: "\n") {
                 guard !line.hasPrefix("#"), !line.hasPrefix("^") else { continue }
                 let parts = line.split(separator: " ", maxSplits: 1)

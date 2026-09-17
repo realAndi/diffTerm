@@ -111,6 +111,20 @@ struct ShellIntegration {
         blocks[blocks.count - 1] = block
     }
 
+    /// Moves every block along with the text it marks, after a reflow has
+    /// re-wrapped that text onto other rows. A command's start can change
+    /// column as well, so it goes through `position` rather than `row`.
+    mutating func remap(row: (Int) -> Int, position: (Int, Int) -> (row: Int, col: Int)) {
+        for i in blocks.indices {
+            blocks[i].promptStart = row(blocks[i].promptStart)
+            if let start = blocks[i].commandStart {
+                blocks[i].commandStart = position(start.row, start.col)
+            }
+            blocks[i].outputStart = blocks[i].outputStart.map(row)
+            blocks[i].outputEnd = blocks[i].outputEnd.map(row)
+        }
+    }
+
     /// Drops blocks whose text has aged out of scrollback entirely.
     mutating func discard(before oldestStableRow: Int) {
         guard let first = blocks.first, first.promptStart < oldestStableRow else { return }

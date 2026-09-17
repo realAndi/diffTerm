@@ -56,12 +56,29 @@ extension TerminalPaneController: TerminalSearchBarDelegate {
         var row = totalRows - 1
         while row >= 0, searchMatches.count < maxMatches {
             let line = buffer.row(at: row)
-            let text = line.text(to: line.trimmedLength).lowercased()
+            let trimmedLength = line.trimmedLength
+            // Most rows do not match; find that out the cheap way before
+            // building a per-cell column map for the ones that do.
+            guard line.text(to: trimmedLength).lowercased().contains(needle) else {
+                row -= 1
+                continue
+            }
+            var text = String()
+            var columns: [Int] = []
+            // Keep folded characters aligned with cells, not wide trailers.
+            for (col, cell) in line.cells[0..<trimmedLength].enumerated() {
+                guard !cell.attrs.flags.contains(.wideTrailer) else { continue }
+                for ch in String(cell.ch).lowercased() {
+                    text.append(ch)
+                    columns.append(col)
+                }
+            }
+            columns.append(trimmedLength)
             if !text.isEmpty {
                 var searchStart = text.startIndex
                 while let found = text.range(of: needle, range: searchStart..<text.endIndex) {
-                    let startCol = text.distance(from: text.startIndex, to: found.lowerBound)
-                    let endCol = text.distance(from: text.startIndex, to: found.upperBound)
+                    let startCol = columns[text.distance(from: text.startIndex, to: found.lowerBound)]
+                    let endCol = columns[text.distance(from: text.startIndex, to: found.upperBound)]
                     searchMatches.append(TerminalSelection(
                         anchor: GridPosition(row: row, col: startCol),
                         head: GridPosition(row: row, col: endCol)))

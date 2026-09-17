@@ -82,8 +82,8 @@ enum ShellIntegrationInstaller {
 
     static func isInstalled(for shell: Shell) -> Bool {
         guard FileManager.default.fileExists(atPath: scriptPath(for: shell)),
-              let rc = try? String(contentsOfFile: shell.rcPath, encoding: .utf8) else { return false }
-        return rc.contains(marker)
+              let rc = FileManager.default.contents(atPath: shell.rcPath) else { return false }
+        return rc.range(of: Data(marker.utf8)) != nil
     }
 
     /// What the script contains, so it can be read before it is installed.
@@ -97,6 +97,7 @@ enum ShellIntegrationInstaller {
     enum InstallError: LocalizedError {
         case scriptMissing
         case writeFailed(String)
+        case readFailed(String)
 
         var errorDescription: String? {
             switch self {
@@ -104,11 +105,19 @@ enum ShellIntegrationInstaller {
                 return "The integration script is missing from the app bundle."
             case .writeFailed(let path):
                 return "Could not write to \(path)."
+            case .readFailed(let path):
+                return "Could not read \(path), so it was left untouched."
             }
         }
     }
 
     /// Copies the script out and adds the source line, once.
+    ///
+    /// The rc file is someone's own configuration, so it is never rewritten
+    /// here: the two lines are appended in place. Bytes, not a String, because
+    /// a file that is not valid UTF-8 — one Latin-1 character in a comment is
+    /// enough — used to decode as nothing and be replaced wholesale by those
+    /// two lines. Appending also keeps a symlinked rc (stow, chezmoi) a link.
     static func install(for shell: Shell) throws {
         guard let source = bundledScript(for: shell) else { throw InstallError.scriptMissing }
         let fm = FileManager.default
@@ -125,42 +134,83 @@ enum ShellIntegrationInstaller {
         }
 
         let rc = shell.rcPath
-        var contents = (try? String(contentsOfFile: rc, encoding: .utf8)) ?? ""
-        guard !contents.contains(marker) else { return }
+        var addition = Data("\n\(marker)\n\(sourceLine(for: shell))\n".utf8)
 
-        try? fm.createDirectory(atPath: (rc as NSString).deletingLastPathComponent,
-                                withIntermediateDirectories: true, attributes: nil)
-        if !contents.isEmpty && !contents.hasSuffix("\n") { contents += "\n" }
-        contents += "\n\(marker)\n\(sourceLine(for: shell))\n"
+        guard fm.fileExists(atPath: rc) else {
+            try? fm.createDirectory(atPath: (rc as NSString).deletingLastPathComponent,
+                                    withIntermediateDirectories: true, attributes: nil)
+            guard fm.createFile(atPath: rc, contents: addition) else {
+                throw InstallError.writeFailed(rc)
+            }
+            return
+        }
+
+        // A file that exists but cannot be read is not an empty file.
+        guard let contents = fm.contents(atPath: rc) else { throw InstallError.readFailed(rc) }
+        guard contents.range(of: Data(marker.utf8)) == nil else { return }
+        if let last = contents.last, last != UInt8(ascii: "\n") {
+            addition.insert(UInt8(ascii: "\n"), at: 0)
+        }
         do {
-            try contents.write(toFile: rc, atomically: true, encoding: .utf8)
+            let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: rc))
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: addition)
         } catch {
             throw InstallError.writeFailed(rc)
         }
     }
 
     /// Takes both the line and the script back out again.
+    ///
+    /// Only what `install` added goes: the marker, the source line under it,
+    /// and the blank line above it. Everything else in the file is written
+    /// back byte for byte, through any symlink, keeping its permissions.
     static func uninstall(for shell: Shell) {
         try? FileManager.default.removeItem(atPath: scriptPath(for: shell))
-        guard let contents = try? String(contentsOfFile: shell.rcPath, encoding: .utf8) else { return }
+        guard let contents = FileManager.default.contents(atPath: shell.rcPath) else { return }
 
-        var kept: [String] = []
+        let markerBytes = Array(marker.utf8)
+        let scriptBytes = Array("diffterm.".utf8)
+        func trimmed(_ line: ArraySlice<UInt8>) -> ArraySlice<UInt8> {
+            var line = line
+            while let first = line.first, first == 0x20 || first == 0x09 { line.removeFirst() }
+            while let last = line.last, last == 0x20 || last == 0x09 || last == 0x0D { line.removeLast() }
+            return line
+        }
+        // `firstRange(of:)` would do, but needs iOS 16.
+        func contains(_ line: ArraySlice<UInt8>, _ needle: [UInt8]) -> Bool {
+            guard line.count >= needle.count else { return false }
+            return (line.startIndex...(line.endIndex - needle.count)).contains {
+                line[$0..<($0 + needle.count)].elementsEqual(needle)
+            }
+        }
+
+        let lines = Array(contents).split(separator: UInt8(ascii: "\n"),
+                                          omittingEmptySubsequences: false)
+        var kept: [ArraySlice<UInt8>] = []
         var skipNext = false
-        for line in contents.components(separatedBy: "\n") {
-            if line.trimmingCharacters(in: .whitespaces) == marker {
+        var changed = false
+        for line in lines {
+            if trimmed(line).elementsEqual(markerBytes) {
+                // The blank line install put above the marker.
+                if let previous = kept.last, previous.isEmpty { kept.removeLast() }
                 skipNext = true
+                changed = true
                 continue
             }
             if skipNext {
                 skipNext = false
                 // Only drop the line if it is the one we wrote.
-                if line.contains("diffterm.") { continue }
+                if contains(line, scriptBytes) { continue }
             }
             kept.append(line)
         }
-        // Collapse the blank line the install left behind.
-        let cleaned = kept.joined(separator: "\n")
-            .replacingOccurrences(of: "\n\n\n", with: "\n\n")
-        try? cleaned.write(toFile: shell.rcPath, atomically: true, encoding: .utf8)
+        guard changed else { return }
+
+        let cleaned = Data(kept.joined(separator: [UInt8(ascii: "\n")]))
+        // Not atomic: an atomic write replaces a symlink with a plain file and
+        // resets the mode. rc files are small enough to go in a single write.
+        try? cleaned.write(to: URL(fileURLWithPath: shell.rcPath))
     }
 }

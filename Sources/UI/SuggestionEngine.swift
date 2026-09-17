@@ -20,13 +20,33 @@ final class SuggestionEngine {
     private var recordedStart: [Int: Int] = [:]
     private var recordedFinish: Set<Int> = []
 
-    private var predictor = NextCommandPredictor()
+    private var predictor: NextCommandPredictor
+
+    /// Everything a prediction depends on that can change while the shell
+    /// sits at a prompt.
+    private struct PredictionKey: Equatable {
+        var line: String
+        var lastCommandID: Int?
+        var lastExitCode: Int?
+        var pwd: String
+        var shell: String
+        var historyRevision: Int
+    }
+
+    /// The last prediction and what it was made against. Refresh runs after
+    /// every batch of output, and a prompt that redraws a clock produces a
+    /// batch a second with nothing in it that could change the answer, so
+    /// an identical key reuses the result — "nothing to suggest" included —
+    /// rather than running the cascade and its filesystem checks again.
+    private var lastPrediction: (key: PredictionKey, result: Autosuggestion?)?
 
     /// Identifies this pane's command sequence in the shared history.
     let sessionKey: String
 
-    init(sessionKey: String) {
+    /// `predictor` is a test seam; the app always uses the shared history.
+    init(sessionKey: String, predictor: NextCommandPredictor = NextCommandPredictor()) {
         self.sessionKey = sessionKey
+        self.predictor = predictor
     }
 
     var visibleSuffix: String {
@@ -50,7 +70,7 @@ final class SuggestionEngine {
     func recordMarks(emulator: Emulator, commandText: (CommandBlock) -> String?,
                      pwd: String, shell: String) {
         guard Preferences.shared.commandSuggestions else { return }
-        let store = CommandHistoryStore.shared
+        let store = predictor.store
 
         for block in emulator.shellIntegration.blocks.suffix(4) {
             let key = block.promptStart
@@ -67,12 +87,14 @@ final class SuggestionEngine {
                                                  hostname: SuggestionEngine.hostname,
                                                  session: sessionKey)
                 ignored.remove(text)
+                lastPrediction = nil
             }
 
             if block.outputEnd != nil, !recordedFinish.contains(key),
                let id = recordedStart[key], id >= 0 {
                 recordedFinish.insert(key)
                 store.finish(id: id, exitCode: block.exitCode)
+                lastPrediction = nil
             }
         }
 
@@ -115,41 +137,74 @@ final class SuggestionEngine {
         // text flicker as it is typed through.
         if var existing = current {
             if existing.update(buffer: line) {
+                if existing.isVisible {
+                    current = existing
+                    return visibleSuffix != before
+                }
+                // Diverged and only kept for a backspace. The line has moved
+                // on, so try a fresh prediction; if none appears, the hidden
+                // suggestion stays. A visible one is never swapped like this.
+                if let prediction = predictSuggestion(emulator: emulator, pwd: pwd,
+                                                      shell: shell, line: line) {
+                    current = prediction
+                    return visibleSuffix != before
+                }
                 current = existing
                 return visibleSuffix != before
             }
             current = nil
         }
 
+        if let prediction = predictSuggestion(emulator: emulator, pwd: pwd,
+                                              shell: shell, line: line) {
+            current = prediction
+        }
+        return visibleSuffix != before
+    }
+
+    /// Asks the predictor for a suggestion for `line`, using the same context
+    /// the main refresh path builds.
+    ///
+    /// Callers still decide what to do with the answer, so reusing one never
+    /// swaps visible ghost text: that rule lives in `refresh`, which does not
+    /// ask at all while a suggestion is showing.
+    private func predictSuggestion(emulator: Emulator, pwd: String, shell: String,
+                                   line: String) -> Autosuggestion? {
+        let finished = lastFinishedBlock(emulator: emulator)
+        let key = PredictionKey(line: line,
+                                lastCommandID: finished?.id,
+                                lastExitCode: finished?.exitCode,
+                                pwd: pwd,
+                                shell: shell,
+                                historyRevision: predictor.store.revision)
+        if let last = lastPrediction, last.key == key { return last.result }
+
         predictor.ignored = ignored
-        let finished = lastFinishedCommand(emulator: emulator)
         let context = NextCommandPredictor.Context(
-            lastCommand: finished?.command,
+            lastCommand: finished.flatMap { predictor.store.command(forID: $0.id) },
             lastExitCode: finished?.exitCode,
             pwd: pwd,
             shell: shell,
             hostname: SuggestionEngine.hostname,
             prefix: line)
 
-        if let prediction = predictor.predict(context),
-           let suggestion = Autosuggestion(full: prediction.command,
-                                           buffer: line,
-                                           source: prediction.source) {
-            current = suggestion
+        let result = predictor.predict(context).flatMap {
+            Autosuggestion(full: $0.command, buffer: line, source: $0.source)
         }
-        return visibleSuffix != before
+        lastPrediction = (key, result)
+        return result
     }
 
-    /// The command before the one being typed, with the status it exited
-    /// with — the key the episode lookup turns on.
-    private func lastFinishedCommand(emulator: Emulator) -> (command: String, exitCode: Int?)? {
+    /// The history id of the command before the one being typed, with the
+    /// status it exited with — the key the episode lookup turns on. The id
+    /// rather than the text, so the cache key costs no history lookup.
+    private func lastFinishedBlock(emulator: Emulator) -> (id: Int, exitCode: Int?)? {
         let blocks = emulator.shellIntegration.blocks
         guard blocks.count >= 2 else { return nil }
         let previous = blocks[blocks.count - 2]
         guard previous.outputEnd != nil,
               let id = recordedStart[previous.promptStart], id >= 0 else { return nil }
-        _ = id
-        return CommandHistoryStore.shared.command(forID: id).map { ($0, previous.exitCode) }
+        return (id, previous.exitCode)
     }
 
     // MARK: - Acting
@@ -198,7 +253,11 @@ final class SuggestionEngine {
 
     /// Hides the suggestion and remembers not to offer it again.
     func dismiss() {
-        if let command = current?.full { ignored.insert(command) }
+        if let command = current?.full {
+            ignored.insert(command)
+            // The cached answer may be the very suggestion just turned down.
+            lastPrediction = nil
+        }
         current = nil
     }
 

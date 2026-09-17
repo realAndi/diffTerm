@@ -50,6 +50,10 @@ final class TerminalPaneController: UIViewController {
 
     private var pinchStartFontSize: CGFloat = 13
 
+    /// Last time the pinch gesture wrote the font size preference. Writing it
+    /// rebuilds fonts in every pane and re-wraps all scrollback, so throttle.
+    private var lastPinchPreferenceWrite: TimeInterval = 0
+
     /// Set while the user is scrolled up, so output does not yank the view.
     var isPinnedToBottomInternal = true
 
@@ -57,12 +61,16 @@ final class TerminalPaneController: UIViewController {
     /// the offset correction that keeps scrolled-back text under the finger.
     private var lastScrollbackEvicted = 0
 
-    private var bellFeedback: UIImpactFeedbackGenerator?
     private var flashView: UIView?
 
     /// Extra scrollable height reserved below the buffer so a suggestion that
     /// wraps past the last visible row is not clipped. See setGhostText.
     private var ghostOverflowHeight: CGFloat = 0
+
+    // Timestamp of the last bell that was acted on, so a flood of BEL
+    // characters cannot trigger haptics or screen flashes continuously.
+    // Internal so the session delegate extension can access it.
+    var lastBellAt: TimeInterval = 0
 
     /// Command blocks the user has folded, by stable prompt row. Held here
     /// so it survives a view rebuild, and pushed to the view to lay out.
@@ -73,9 +81,16 @@ final class TerminalPaneController: UIViewController {
     /// Ghost text: what to suggest next, and the history it learns from.
     private(set) lazy var suggestions = SuggestionEngine(sessionKey: session.identifier.uuidString)
 
+    /// The reflow generation seen at the last resize, so a reflow's row map is
+    /// applied to `collapsedBlocks` once per reflow rather than on every resize.
+    private var lastSeenReflowGeneration = 0
+
     /// Find-in-scrollback state.
     var searchMatches: [TerminalSelection] = []
     var searchIndex: Int?
+
+    // Cache the fixed shortcuts to avoid allocating them on every UIKit query.
+    private(set) lazy var cachedKeyCommands: [UIKeyCommand] = paneKeyCommands
 
     // MARK: - Init
 
@@ -211,16 +226,13 @@ final class TerminalPaneController: UIViewController {
         terminalView.update(palette: palette)
         terminalView.boldIsBright = prefs.boldIsBright
         terminalView.useBoldFont = prefs.useBoldFont
-        terminalView.preferredCursorShape = prefs.cursorShape
         terminalView.blockMode = prefs.blockMode
         // Tell a program that asked (DEC 2031) which way the theme reads, and
         // let it re-theme live when the user switches between light and dark.
         let theme = prefs.theme(for: traitCollection.userInterfaceStyle)
         session.emulator.colorSchemeChanged(isDark: theme.isDark)
-        // A program that has not expressed an opinion follows the user's.
-        if session.emulator.modes.cursorShape == .block && prefs.cursorShape != .block {
-            session.emulator.modes.cursorShape = prefs.cursorShape
-        }
+        // Follow the user's preference unless a program chose its own shape.
+        session.emulator.defaultCursorShape = prefs.cursorShape
     }
 
     override func traitCollectionDidChange(_ previous: UITraitCollection?) {
@@ -249,6 +261,14 @@ final class TerminalPaneController: UIViewController {
         session.resize(cols: cols, rows: rows,
                        pixelWidth: CGFloat(cols) * terminalView.cellSize.width,
                        pixelHeight: CGFloat(rows) * terminalView.cellSize.height)
+        // A reflow moved the rows out from under the folded blocks, so they
+        // have to follow their prompt rows to the new positions.
+        if session.emulator.reflowGeneration != lastSeenReflowGeneration {
+            lastSeenReflowGeneration = session.emulator.reflowGeneration
+            if let map = session.emulator.lastReflowMap, !collapsedBlocks.isEmpty {
+                collapsedBlocks = Set(collapsedBlocks.map(map))
+            }
+        }
         syncScrollGeometry(keepAtBottom: isPinnedToBottomInternal)
     }
 
@@ -289,8 +309,9 @@ final class TerminalPaneController: UIViewController {
         if isPinnedToBottomInternal {
             // A drag in progress owns the offset. Snapping back mid-gesture is
             // what makes a terminal feel like it is fighting the user.
-            guard !scrollView.isDragging, !scrollView.isDecelerating else { return }
-            scrollToBottom(animated: false)
+            if !scrollView.isDragging, !scrollView.isDecelerating {
+                scrollToBottom(animated: false)
+            }
         } else if dropped > 0 {
             // Lines aged out of the top of the ring, so everything below them
             // moved up by exactly that much. Move with it, rather than letting
@@ -567,7 +588,13 @@ final class TerminalPaneController: UIViewController {
         case .changed:
             let target = (pinchStartFontSize * g.scale).rounded()
             guard target != Preferences.shared.fontSize, target >= 6, target <= 32 else { return }
+            guard CACurrentMediaTime() - lastPinchPreferenceWrite >= 0.12 else { return }
+            lastPinchPreferenceWrite = CACurrentMediaTime()
             Preferences.shared.fontSize = target
+        case .ended, .cancelled:
+            // No range guard: a throttled write may have stopped short of the
+            // limit, and the setter clamps and skips an unchanged size.
+            Preferences.shared.fontSize = (pinchStartFontSize * g.scale).rounded()
         default:
             break
         }
@@ -733,6 +760,46 @@ final class TerminalPaneController: UIViewController {
 
     @objc func pasteFromClipboard() {
         guard let text = UIPasteboard.general.string, !text.isEmpty else { return }
+        pasteConfirmingIfNeeded(text)
+    }
+
+    /// Routes every paste through the confirmation so that a multi-line
+    /// clipboard can never start running commands without a warning.
+    func pasteConfirmingIfNeeded(_ text: String) {
+        // By Character, not by "\n": a CRLF pair is a single Character, so
+        // text copied from Windows contains neither "\n" nor "\r" as far as
+        // `contains` is concerned — and would have skipped the question.
+        let needsConfirmation = Preferences.shared.confirmMultilinePaste
+            && text.contains(where: \.isNewline)
+        guard needsConfirmation, !session.emulator.modes.bracketedPaste else {
+            performPaste(text)
+            return
+        }
+
+        var lines = text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+        // A trailing newline ends the last line; it does not start another.
+        if lines.count > 1, lines.last?.isEmpty == true { lines.removeLast() }
+        let lineCount = lines.count
+        let preview = lines.filter { !$0.isEmpty }
+            .prefix(3)
+            .map { line -> String in
+                let s = String(line)
+                return s.count > 60 ? s.prefix(60) + "…" : s
+            }
+            .joined(separator: "\n")
+
+        let alert = UIAlertController(
+            title: lineCount == 1 ? "Paste and Run 1 Line?" : "Paste \(lineCount) Lines?",
+            message: "\(preview)\nEach line break will run as a command.",
+            preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Paste", style: .default) { [weak self] _ in
+            self?.performPaste(text)
+        })
+        present(alert, animated: true)
+    }
+
+    private func performPaste(_ text: String) {
         session.paste(text)
         clearSelection()
         scrollToBottom(animated: false)
@@ -844,8 +911,10 @@ final class TerminalPaneController: UIViewController {
         }
         // Running something retires the suggestion without holding it against
         // the command — dismissing is the user saying no, this is not.
+        // Avoid loading the history when suggestions are switched off.
         switch key {
-        case .enter, .keypadEnter: suggestions.clear()
+        case .enter, .keypadEnter:
+            if Preferences.shared.commandSuggestions { suggestions.clear() }
         default: break
         }
 

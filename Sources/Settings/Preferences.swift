@@ -103,6 +103,10 @@ enum StartDirectory: String, CaseIterable {
     }
 }
 
+private enum PreferenceKeys {
+    static var all: [String] = []
+}
+
 @propertyWrapper
 struct Stored<Value> {
     let key: String
@@ -113,6 +117,7 @@ struct Stored<Value> {
         self.key = key
         self.defaultValue = defaultValue
         self.store = store
+        PreferenceKeys.all.append(key)
     }
 
     var wrappedValue: Value {
@@ -136,30 +141,54 @@ final class Preferences {
         NotificationCenter.default.post(name: Preferences.didChangeNotification, object: self)
     }
 
+    func resetAll(keeping: Set<String>) {
+        for key in PreferenceKeys.all where !keeping.contains(key) {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+        changed()
+    }
+
     // MARK: Appearance
 
     @Stored("themeMode", ThemeMode.automatic.rawValue) private var themeModeRaw: String
     var themeMode: ThemeMode {
         get { ThemeMode(rawValue: themeModeRaw) ?? .automatic }
-        set { themeModeRaw = newValue.rawValue; changed() }
+        set {
+            let value = newValue.rawValue
+            guard value != themeModeRaw else { return }
+            themeModeRaw = value
+            changed()
+        }
     }
 
     @Stored("darkThemeID", "diffterm-dark") private var darkThemeIDStored: String
     var darkThemeID: String {
         get { darkThemeIDStored }
-        set { darkThemeIDStored = newValue; changed() }
+        set {
+            guard newValue != darkThemeIDStored else { return }
+            darkThemeIDStored = newValue
+            changed()
+        }
     }
 
     @Stored("lightThemeID", "diffterm-light") private var lightThemeIDStored: String
     var lightThemeID: String {
         get { lightThemeIDStored }
-        set { lightThemeIDStored = newValue; changed() }
+        set {
+            guard newValue != lightThemeIDStored else { return }
+            lightThemeIDStored = newValue
+            changed()
+        }
     }
 
     @Stored("matchIconToTheme", true) private var matchIconStored: Bool
     var matchIconToTheme: Bool {
         get { matchIconStored }
-        set { matchIconStored = newValue; changed() }
+        set {
+            guard newValue != matchIconStored else { return }
+            matchIconStored = newValue
+            changed()
+        }
     }
 
     func theme(for style: UIUserInterfaceStyle) -> Theme {
@@ -181,31 +210,53 @@ final class Preferences {
     @Stored("fontName", "JetBrainsMono Nerd Font Mono") private var fontNameStored: String
     var fontName: String {
         get { fontNameStored }
-        set { fontNameStored = newValue; changed() }
+        set {
+            guard newValue != fontNameStored else { return }
+            fontNameStored = newValue
+            changed()
+        }
     }
 
     @Stored("fontSize", DeviceMetrics.defaultFontSize) private var fontSizeStored: Double
     var fontSize: CGFloat {
         get { CGFloat(min(max(fontSizeStored, 6), 32)) }
-        set { fontSizeStored = Double(min(max(newValue, 6), 32)); changed() }
+        set {
+            let clamped = Double(min(max(newValue, 6), 32))
+            guard clamped != fontSizeStored else { return }
+            fontSizeStored = clamped
+            changed()
+        }
     }
 
     @Stored("lineHeightScale", 1.0) private var lineHeightStored: Double
     var lineHeightScale: CGFloat {
         get { CGFloat(min(max(lineHeightStored, 0.85), 1.6)) }
-        set { lineHeightStored = Double(min(max(newValue, 0.85), 1.6)); changed() }
+        set {
+            let clamped = Double(min(max(newValue, 0.85), 1.6))
+            guard clamped != lineHeightStored else { return }
+            lineHeightStored = clamped
+            changed()
+        }
     }
 
     @Stored("boldIsBright", true) private var boldIsBrightStored: Bool
     var boldIsBright: Bool {
         get { boldIsBrightStored }
-        set { boldIsBrightStored = newValue; changed() }
+        set {
+            guard newValue != boldIsBrightStored else { return }
+            boldIsBrightStored = newValue
+            changed()
+        }
     }
 
     @Stored("useBoldFont", true) private var useBoldFontStored: Bool
     var useBoldFont: Bool {
         get { useBoldFontStored }
-        set { useBoldFontStored = newValue; changed() }
+        set {
+            guard newValue != useBoldFontStored else { return }
+            useBoldFontStored = newValue
+            changed()
+        }
     }
 
     // MARK: Cursor
@@ -213,13 +264,22 @@ final class Preferences {
     @Stored("cursorShape", CursorShape.block.rawValue) private var cursorShapeStored: Int
     var cursorShape: CursorShape {
         get { CursorShape(rawValue: cursorShapeStored) ?? .block }
-        set { cursorShapeStored = newValue.rawValue; changed() }
+        set {
+            let value = newValue.rawValue
+            guard value != cursorShapeStored else { return }
+            cursorShapeStored = value
+            changed()
+        }
     }
 
     @Stored("cursorBlink", true) private var cursorBlinkStored: Bool
     var cursorBlink: Bool {
         get { cursorBlinkStored }
-        set { cursorBlinkStored = newValue; changed() }
+        set {
+            guard newValue != cursorBlinkStored else { return }
+            cursorBlinkStored = newValue
+            changed()
+        }
     }
 
     // MARK: Behaviour
@@ -227,19 +287,33 @@ final class Preferences {
     @Stored("scrollbackLines", 10_000) private var scrollbackStored: Int
     var scrollbackLines: Int {
         get { min(max(scrollbackStored, 100), 200_000) }
-        set { scrollbackStored = min(max(newValue, 100), 200_000); changed() }
+        set {
+            let clamped = min(max(newValue, 100), 200_000)
+            guard clamped != scrollbackStored else { return }
+            scrollbackStored = clamped
+            changed()
+        }
     }
 
     @Stored("bell", BellBehaviour.haptic.rawValue) private var bellStored: String
     var bell: BellBehaviour {
         get { BellBehaviour(rawValue: bellStored) ?? .haptic }
-        set { bellStored = newValue.rawValue; changed() }
+        set {
+            let value = newValue.rawValue
+            guard value != bellStored else { return }
+            bellStored = value
+            changed()
+        }
     }
 
     @Stored("copyOnSelect", false) private var copyOnSelectStored: Bool
     var copyOnSelect: Bool {
         get { copyOnSelectStored }
-        set { copyOnSelectStored = newValue; changed() }
+        set {
+            guard newValue != copyOnSelectStored else { return }
+            copyOnSelectStored = newValue
+            changed()
+        }
     }
 
     /// Puts the app's own `pbcopy`/`pbpaste` ahead of the bootstrap's on the
@@ -250,39 +324,23 @@ final class Preferences {
     @Stored("clipboardHelpers", true) private var clipboardHelpersStored: Bool
     var clipboardHelpers: Bool {
         get { clipboardHelpersStored }
-        set { clipboardHelpersStored = newValue; changed() }
+        set {
+            guard newValue != clipboardHelpersStored else { return }
+            clipboardHelpersStored = newValue
+            changed()
+        }
     }
 
     @Stored("clipboardReadAccess", ClipboardReadAccess.ask.rawValue)
     private var clipboardReadAccessStored: String
     var clipboardReadAccess: ClipboardReadAccess {
         get { ClipboardReadAccess(rawValue: clipboardReadAccessStored) ?? .ask }
-        set { clipboardReadAccessStored = newValue.rawValue; changed() }
-    }
-
-    /// Run shells inside the launchd session daemon, so they survive the app
-    /// being backgrounded, killed or force-quit. Off by default and treated as
-    /// experimental: the daemon is fast in isolation but has proven unstable
-    /// under real multi-tab use on device (it crashes and does not always
-    /// recover), which shows up as sluggish, dropping sessions. Left in place,
-    /// opt-in, until it is hardened. When off, shells run locally — fast, and
-    /// they die with the app, which is the historical behaviour.
-    @Stored("persistentSessions", false) private var persistentSessionsStored: Bool
-    var persistentSessions: Bool {
-        get { persistentSessionsStored }
-        set { persistentSessionsStored = newValue; changed() }
-    }
-
-    /// Run shells inside tmux, reached over its control mode, so they survive
-    /// the app the way `persistentSessions` was meant to. tmux's server is not
-    /// the app's child and has been keeping shells alive for twenty years,
-    /// which is the argument for it over the daemon we would have to harden
-    /// ourselves. Off by default because it needs tmux installed, and because
-    /// a terminal that silently routes through something else is a surprise.
-    @Stored("tmuxSessions", false) private var tmuxSessionsStored: Bool
-    var tmuxSessions: Bool {
-        get { tmuxSessionsStored }
-        set { tmuxSessionsStored = newValue; changed() }
+        set {
+            let value = newValue.rawValue
+            guard value != clipboardReadAccessStored else { return }
+            clipboardReadAccessStored = value
+            changed()
+        }
     }
 
     /// Whether the screen comes back after the app is killed in the
@@ -290,7 +348,11 @@ final class Preferences {
     @Stored("restoreSessions", true) private var restoreSessionsStored: Bool
     var restoreSessions: Bool {
         get { restoreSessionsStored }
-        set { restoreSessionsStored = newValue; changed() }
+        set {
+            guard newValue != restoreSessionsStored else { return }
+            restoreSessionsStored = newValue
+            changed()
+        }
     }
 
     /// Local notification when a long command finishes while you are in
@@ -298,7 +360,11 @@ final class Preferences {
     @Stored("notifyOnCommandFinish", true) private var notifyOnCommandFinishStored: Bool
     var notifyOnCommandFinish: Bool {
         get { notifyOnCommandFinishStored }
-        set { notifyOnCommandFinishStored = newValue; changed() }
+        set {
+            guard newValue != notifyOnCommandFinishStored else { return }
+            notifyOnCommandFinishStored = newValue
+            changed()
+        }
     }
 
     // MARK: Blocks
@@ -310,7 +376,11 @@ final class Preferences {
     @Stored("blockMode", false) private var blockModeStored: Bool
     var blockMode: Bool {
         get { blockModeStored }
-        set { blockModeStored = newValue; changed() }
+        set {
+            guard newValue != blockModeStored else { return }
+            blockModeStored = newValue
+            changed()
+        }
     }
 
     /// Ghost text after the cursor: the command you are most likely to run
@@ -322,7 +392,11 @@ final class Preferences {
     @Stored("commandSuggestions", false) private var commandSuggestionsStored: Bool
     var commandSuggestions: Bool {
         get { commandSuggestionsStored }
-        set { commandSuggestionsStored = newValue; changed() }
+        set {
+            guard newValue != commandSuggestionsStored else { return }
+            commandSuggestionsStored = newValue
+            changed()
+        }
     }
 
     /// Ask a zsh of our own — with the user's rc files loaded — what its
@@ -334,7 +408,11 @@ final class Preferences {
     @Stored("shellCompletions", true) private var shellCompletionsStored: Bool
     var shellCompletions: Bool {
         get { shellCompletionsStored }
-        set { shellCompletionsStored = newValue; changed() }
+        set {
+            guard newValue != shellCompletionsStored else { return }
+            shellCompletionsStored = newValue
+            changed()
+        }
     }
 
     /// Whether Tab takes the suggestion. Off means only the arrow key and a
@@ -342,44 +420,97 @@ final class Preferences {
     @Stored("suggestionAcceptsTab", true) private var suggestionAcceptsTabStored: Bool
     var suggestionAcceptsTab: Bool {
         get { suggestionAcceptsTabStored }
-        set { suggestionAcceptsTabStored = newValue; changed() }
+        set {
+            guard newValue != suggestionAcceptsTabStored else { return }
+            suggestionAcceptsTabStored = newValue
+            changed()
+        }
     }
 
     @Stored("detectLinks", true) private var detectLinksStored: Bool
     var detectLinks: Bool {
         get { detectLinksStored }
-        set { detectLinksStored = newValue; changed() }
+        set {
+            guard newValue != detectLinksStored else { return }
+            detectLinksStored = newValue
+            changed()
+        }
     }
 
     @Stored("confirmClose", true) private var confirmCloseStored: Bool
     var confirmCloseWithRunningProcess: Bool {
         get { confirmCloseStored }
-        set { confirmCloseStored = newValue; changed() }
+        set {
+            guard newValue != confirmCloseStored else { return }
+            confirmCloseStored = newValue
+            changed()
+        }
+    }
+
+    /// Ask before pasting text with a line break in it into a program that
+    /// has not turned on bracketed paste — where every newline runs a command.
+    @Stored("confirmMultilinePaste", true) private var confirmMultilinePasteStored: Bool
+    var confirmMultilinePaste: Bool {
+        get { confirmMultilinePasteStored }
+        set {
+            guard newValue != confirmMultilinePasteStored else { return }
+            confirmMultilinePasteStored = newValue
+            changed()
+        }
+    }
+
+    /// Keep the screen from locking while a command is running. A locked phone
+    /// suspends the app, and a shell the app owns stops with it.
+    @Stored("keepScreenAwake", true) private var keepScreenAwakeStored: Bool
+    var keepScreenAwakeWhileRunning: Bool {
+        get { keepScreenAwakeStored }
+        set {
+            guard newValue != keepScreenAwakeStored else { return }
+            keepScreenAwakeStored = newValue
+            changed()
+        }
     }
 
     @Stored("keyboardHaptics", true) private var keyboardHapticsStored: Bool
     var keyboardHaptics: Bool {
         get { keyboardHapticsStored }
-        set { keyboardHapticsStored = newValue; changed() }
+        set {
+            guard newValue != keyboardHapticsStored else { return }
+            keyboardHapticsStored = newValue
+            changed()
+        }
     }
 
     @Stored("trackpadSensitivity", TrackpadSensitivity.medium.rawValue)
     private var trackpadStored: String
     var trackpadSensitivity: TrackpadSensitivity {
         get { TrackpadSensitivity(rawValue: trackpadStored) ?? .medium }
-        set { trackpadStored = newValue.rawValue; changed() }
+        set {
+            let value = newValue.rawValue
+            guard value != trackpadStored else { return }
+            trackpadStored = value
+            changed()
+        }
     }
 
     @Stored("showKeyRow", true) private var showKeyRowStored: Bool
     var showKeyRow: Bool {
         get { showKeyRowStored }
-        set { showKeyRowStored = newValue; changed() }
+        set {
+            guard newValue != showKeyRowStored else { return }
+            showKeyRowStored = newValue
+            changed()
+        }
     }
 
     @Stored("keyRowShowsFunctionKeys", false) private var fnRowStored: Bool
     var keyRowShowsFunctionKeys: Bool {
         get { fnRowStored }
-        set { fnRowStored = newValue; changed() }
+        set {
+            guard newValue != fnRowStored else { return }
+            fnRowStored = newValue
+            changed()
+        }
     }
 
     // MARK: Shell
@@ -388,25 +519,42 @@ final class Preferences {
     /// Empty means "pick the best available shell at launch".
     var shellPath: String {
         get { shellPathStored }
-        set { shellPathStored = newValue; changed() }
+        set {
+            guard newValue != shellPathStored else { return }
+            shellPathStored = newValue
+            changed()
+        }
     }
 
     @Stored("loginShell", true) private var loginShellStored: Bool
     var loginShell: Bool {
         get { loginShellStored }
-        set { loginShellStored = newValue; changed() }
+        set {
+            guard newValue != loginShellStored else { return }
+            loginShellStored = newValue
+            changed()
+        }
     }
 
     @Stored("startDirectory", StartDirectory.deviceHome.rawValue) private var startDirStored: String
     var startDirectory: StartDirectory {
         get { StartDirectory(rawValue: startDirStored) ?? .home }
-        set { startDirStored = newValue.rawValue; changed() }
+        set {
+            let value = newValue.rawValue
+            guard value != startDirStored else { return }
+            startDirStored = value
+            changed()
+        }
     }
 
     @Stored("customStartDirectory", "") private var customStartDirStored: String
     var customStartDirectory: String {
         get { customStartDirStored.isEmpty ? UserEnvironment.deviceHome : customStartDirStored }
-        set { customStartDirStored = newValue; changed() }
+        set {
+            guard newValue != customStartDirStored else { return }
+            customStartDirStored = newValue
+            changed()
+        }
     }
 
     /// Whether a new tab starts where the tab it was opened from is, rather
@@ -416,7 +564,11 @@ final class Preferences {
     @Stored("newTabInheritsDirectory", true) private var newTabInheritsDirStored: Bool
     var newTabInheritsDirectory: Bool {
         get { newTabInheritsDirStored }
-        set { newTabInheritsDirStored = newValue; changed() }
+        set {
+            guard newValue != newTabInheritsDirStored else { return }
+            newTabInheritsDirStored = newValue
+            changed()
+        }
     }
 
     /// Updated as sessions report their cwd via OSC 7, so a new tab can open
@@ -430,7 +582,11 @@ final class Preferences {
     @Stored("startupCommand", "") private var startupCommandStored: String
     var startupCommand: String {
         get { startupCommandStored }
-        set { startupCommandStored = newValue; changed() }
+        set {
+            guard newValue != startupCommandStored else { return }
+            startupCommandStored = newValue
+            changed()
+        }
     }
 
     // MARK: Key row contents
@@ -441,21 +597,46 @@ final class Preferences {
     /// version shows up instead of being silently absent.
     var hiddenKeyRowKeys: Set<String> {
         get { Set(hiddenKeyRowKeysStored) }
-        set { hiddenKeyRowKeysStored = newValue.sorted(); changed() }
+        set {
+            let value = newValue.sorted()
+            guard value != hiddenKeyRowKeysStored else { return }
+            hiddenKeyRowKeysStored = value
+            changed()
+        }
     }
 
     @Stored("customKeys", [] as [[String: String]]) private var customKeysStored: [[String: String]]
     var customKeys: [CustomKey] {
         get { customKeysStored.compactMap(CustomKey.init(dictionary:)) }
-        set { customKeysStored = newValue.map { $0.dictionary }; changed() }
+        set {
+            let value = newValue.map { $0.dictionary }
+            guard value != customKeysStored else { return }
+            customKeysStored = value
+            changed()
+        }
     }
 
     // MARK: Snippets
 
+    @Stored("snippetsSeeded", false) private var snippetsSeededStored: Bool
+    var snippetsSeeded: Bool {
+        get { snippetsSeededStored }
+        set {
+            guard newValue != snippetsSeededStored else { return }
+            snippetsSeededStored = newValue
+            changed()
+        }
+    }
+
     @Stored("snippets", [] as [[String: String]]) private var snippetsStored: [[String: String]]
     var snippets: [Snippet] {
         get { snippetsStored.compactMap(Snippet.init(dictionary:)) }
-        set { snippetsStored = newValue.map { $0.dictionary }; changed() }
+        set {
+            let value = newValue.map { $0.dictionary }
+            guard value != snippetsStored else { return }
+            snippetsStored = value
+            changed()
+        }
     }
 }
 

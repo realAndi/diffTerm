@@ -23,6 +23,10 @@ struct CellFlags: OptionSet, Hashable {
     static let overline        = CellFlags(rawValue: 1 << 10)
     /// Set on the trailing half of a double-width glyph.
     static let wideTrailer     = CellFlags(rawValue: 1 << 11)
+    /// Set on the blank left in the last column when a double-width glyph
+    /// did not fit there and wrapped. It looks exactly like a typed space, so
+    /// reflow needs to be told which one it is before joining rows back up.
+    static let wrapPadding     = CellFlags(rawValue: 1 << 12)
 
     var anyUnderline: Bool {
         !isDisjoint(with: [.underline, .doubleUnderline, .curlyUnderline])
@@ -89,7 +93,11 @@ struct Line {
     /// copy path skip trailing whitespace.
     var trimmedLength: Int {
         var n = cells.count
-        while n > 0, cells[n - 1].isBlank, cells[n - 1].attrs.bg == .default { n -= 1 }
+        // The second half of a wide glyph is stored as a blank, but it is
+        // part of the glyph: trimming it left a line ending in 日 one column
+        // short, and that line then wrapped and copied as if 日 were narrow.
+        while n > 0, cells[n - 1].isBlank, cells[n - 1].attrs.bg == .default,
+              !cells[n - 1].attrs.flags.contains(.wideTrailer) { n -= 1 }
         return n
     }
 

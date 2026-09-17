@@ -28,7 +28,17 @@ struct TerminalPalette {
         defaultForeground = foregroundOverride.map { Theme.RGB($0.0, $0.1, $0.2) } ?? theme.foreground
         defaultBackground = backgroundOverride.map { Theme.RGB($0.0, $0.1, $0.2) } ?? theme.background
         cursorColor = cursorOverride.map { Theme.RGB($0.0, $0.1, $0.2) } ?? theme.cursor
+        // The renderer asks for these on every draw — ghost text and each
+        // block rail — and each answer is a search over blend amounts.
+        var secondary: [CGFloat: Theme.RGB] = [:]
+        for contrast: CGFloat in [4.0, 3.0, 2.2] {
+            secondary[contrast] = TerminalPalette.solveSecondary(
+                fg: defaultForeground, bg: defaultBackground, minimumContrast: contrast)
+        }
+        secondaryForegrounds = secondary
     }
+
+    private let secondaryForegrounds: [CGFloat: Theme.RGB]
 
     @inline(__always)
     func rgb(for color: TermColor, fallback: Theme.RGB) -> Theme.RGB {
@@ -99,8 +109,13 @@ struct TerminalPalette {
     /// legible. Falls back to the plain foreground for a theme whose own text
     /// does not reach the floor — dimming that further would be worse.
     func secondaryForeground(minimumContrast: CGFloat = 4.0) -> Theme.RGB {
-        let bg = defaultBackground
-        let fg = defaultForeground
+        secondaryForegrounds[minimumContrast]
+            ?? TerminalPalette.solveSecondary(fg: defaultForeground, bg: defaultBackground,
+                                              minimumContrast: minimumContrast)
+    }
+
+    private static func solveSecondary(fg: Theme.RGB, bg: Theme.RGB,
+                                       minimumContrast: CGFloat) -> Theme.RGB {
         guard fg.contrastRatio(with: bg) >= minimumContrast else { return fg }
 
         var amount: CGFloat = 0.70
