@@ -13,6 +13,53 @@
 #include <xlocale.h>
 #include <langinfo.h>
 
+/* Why an exec failed, for the child to print. strerror is not
+   async-signal-safe, and between fork and exec in a threaded process only
+   those are, so the reasons worth telling apart are spelled out here. */
+static const char *exec_failure_reason(int err) {
+    switch (err) {
+    case ENOENT:   return "no such file";
+    case EACCES:   return "permission denied";
+    case EPERM:    return "operation not permitted";
+    case ENOEXEC:  return "not a program this system can run";
+    case ENOTDIR:  return "a component of the path is not a directory";
+    case ELOOP:    return "too many levels of symbolic links";
+#ifdef EBADARCH
+    case EBADARCH: return "built for the wrong architecture";
+#endif
+#ifdef EBADEXEC
+    case EBADEXEC: return "bad executable (often a code signature iOS rejected)";
+#endif
+    default:       return "exec failed";
+    }
+}
+
+static void write_str(int fd, const char *s) {
+    size_t len = strlen(s);
+    while (len > 0) {
+        ssize_t n = write(fd, s, len);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return;
+        s += n;
+        len -= (size_t)n;
+    }
+}
+
+/* Decimal, without printf, for the same reason as above. */
+static void write_int(int fd, int value) {
+    char digits[12];
+    int i = (int)sizeof(digits);
+    unsigned int v = value < 0 ? 0u - (unsigned int)value : (unsigned int)value;
+    do { digits[--i] = (char)('0' + v % 10); v /= 10; } while (v && i > 1);
+    if (value < 0) digits[--i] = '-';
+    while (i < (int)sizeof(digits)) {
+        ssize_t n = write(fd, digits + i, (size_t)((int)sizeof(digits) - i));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return;
+        i += (int)n;
+    }
+}
+
 int dt_spawn_pty(const char *path,
                  char *const argv[],
                  char *const envp[],
@@ -96,8 +143,18 @@ int dt_spawn_pty(const char *path,
         }
 
         execve(path, argv, envp);
-        /* execve only returns on failure; _exit avoids running any atexit
-           handlers inherited from the parent. */
+        /* execve only returns on failure. Say so on the terminal: a bare
+           "exited with status 127" gives the person looking at it nothing
+           to go on. _exit avoids running any atexit handlers inherited
+           from the parent. */
+        int err = errno;
+        write_str(STDERR_FILENO, "\033[1;31mdiffTerm:\033[0m couldn't run ");
+        write_str(STDERR_FILENO, path);
+        write_str(STDERR_FILENO, ": ");
+        write_str(STDERR_FILENO, exec_failure_reason(err));
+        write_str(STDERR_FILENO, " (errno ");
+        write_int(STDERR_FILENO, err);
+        write_str(STDERR_FILENO, ")\n");
         _exit(127);
     }
 

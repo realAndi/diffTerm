@@ -63,7 +63,7 @@ enum AppIconManager {
         if setIconSilently(app, name: name) { return }
 
         app.setAlternateIconName(name) { error in
-            if let error { print("diffTerm: icon change failed — \(error.localizedDescription)") }
+            if let error { NSLog("diffTerm: icon change failed — %@", error.localizedDescription) }
         }
     }
 
@@ -88,7 +88,7 @@ enum AppIconManager {
         let setter = unsafeBitCast(method_getImplementation(method), to: SilentSetter.self)
         setter(app, selector, name as NSString?) { error in
             if let error {
-                print("diffTerm: icon change failed — \(error.localizedDescription)")
+                NSLog("diffTerm: icon change failed — %@", error.localizedDescription)
             }
         }
         return true

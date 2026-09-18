@@ -1,5 +1,6 @@
 #!/bin/sh
 # prerm: unregister the app before the bundle goes away.
-APP=/var/jb/Applications/diffTerm.app
+# The bootstrap prefix is filled in per package by tools/build-deb.sh; see postinst.
+APP=@JB@/Applications/diffTerm.app
 uicache -u "$APP"
 exit 0

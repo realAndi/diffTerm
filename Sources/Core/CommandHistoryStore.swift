@@ -157,9 +157,13 @@ final class CommandHistoryStore {
             // Empty commands are recorded so that ids stay dense and "the
             // next command" cannot silently skip a bare Enter, but every
             // query filters them out.
+            // Directories are stored the way the shell spells them, so a
+            // history written on roothide still matches after a reinstall
+            // renames the bootstrap. Every query below compares in the same
+            // spelling.
             records.append(CommandRecord(id: id, command: trimmed, exitCode: nil,
                                          startedAt: Date(), finishedAt: nil,
-                                         pwd: pwd, shell: shell,
+                                         pwd: JailbreakRoot.toShell(pwd), shell: shell,
                                          hostname: hostname, session: session))
             if records.count > limit { records.removeFirst(records.count - limit) }
             dirty = true
@@ -194,6 +198,7 @@ final class CommandHistoryStore {
         // A copy is a retain, not a copy of the rows: the scan runs without
         // holding the lock, and a `begin` meanwhile does not disturb it.
         let records = locked { self.records }
+        let pwd = JailbreakRoot.toShell(pwd)
 
         var episodes: [CommandEpisode] = []
         // Walk by index, newest first. Locating a match and then locating the
@@ -255,6 +260,7 @@ final class CommandHistoryStore {
     func recent(matching prefix: String, pwd: String, limit: Int = 8) -> [String] {
         guard !prefix.isEmpty else { return [] }
         let records = locked { self.records }
+        let pwd = JailbreakRoot.toShell(pwd)
         var here: [String] = []
         var elsewhere: [String] = []
         var seen = Set<String>()

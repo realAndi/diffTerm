@@ -13,6 +13,20 @@ protocol TerminalSessionDelegate: AnyObject {
     func sessionPaletteDidChange(_ session: TerminalSession)
 }
 
+/// Nothing the app looked for is there to run as a shell.
+struct MissingShellError: LocalizedError {
+    var layout: JailbreakRoot.Layout
+
+    var errorDescription: String? {
+        if layout.prefix.isEmpty {
+            return "Couldn't start a shell: no jailbreak bootstrap was found "
+                + "(nothing at /var/jb, and no roothide root), and iOS has no shell of its own."
+        }
+        return "Couldn't start a shell: none of zsh, bash or sh is in "
+            + "\(layout.jb("/usr/bin")) or \(layout.jb("/bin"))."
+    }
+}
+
 /// One shell, one emulator, one view's worth of state.
 ///
 /// Output arrives on the pty's IO queue and is parked in a buffer; the actual
@@ -30,6 +44,19 @@ final class TerminalSession: NSObject {
 
     private(set) var isRunning = false
     private(set) var exitCode: Int32?
+
+    /// When the running shell was started and, once it has, when it exited.
+    /// A shell that fails straight away is nearly always a setup problem
+    /// rather than someone typing `exit`, and gets a full report.
+    private var startedAt: Date?
+    private var exitedAt: Date?
+
+    /// Whether the shell failed within moments of starting.
+    var failedOnArrival: Bool {
+        guard let code = exitCode, code != 0,
+              let startedAt, let exitedAt else { return false }
+        return exitedAt.timeIntervalSince(startedAt) < 3
+    }
 
     /// Shown in the tab bar: the program's own title if it set one, otherwise
     /// the foreground process name, otherwise the shell.
@@ -137,7 +164,7 @@ final class TerminalSession: NSObject {
         while let last = lines.last, last.runs.isEmpty { lines.removeLast() }
 
         return SessionSnapshot(title: displayTitle,
-                               workingDirectory: workingDirectory,
+                               workingDirectory: JailbreakRoot.toShell(workingDirectory),
                                lines: lines,
                                savedAt: Date())
     }
@@ -150,7 +177,8 @@ final class TerminalSession: NSObject {
     /// because silently presenting dead output as a running terminal is how
     /// someone ends up waiting on a build that stopped existing hours ago.
     func restore(from snapshot: SessionSnapshot) {
-        let restoredDirectory = UserEnvironment.logicalPath(snapshot.workingDirectory)
+        let restoredDirectory = UserEnvironment.logicalPath(
+            JailbreakRoot.fromShell(snapshot.workingDirectory))
         if TerminalSession.isDirectory(restoredDirectory) {
             workingDirectory = restoredDirectory
         }
@@ -216,15 +244,28 @@ final class TerminalSession: NSObject {
         defaultTitle = (shell as NSString).lastPathComponent
         cachedShellName = defaultTitle
 
-        // A login shell is started as `-zsh`: the dash is how it knows.
-        let arguments = [Preferences.shared.loginShell ? "-\(defaultTitle)" : shell]
+        // `resolvedShell` ends at /bin/sh without checking it, and iOS has no
+        // /bin/sh of its own. With no bootstrap found, the exec would fail and
+        // all anyone would see is "exited with status 127", every time they
+        // tapped to retry. Stop here and say what is missing instead.
+        guard FileManager.default.isExecutableFile(atPath: shell) else {
+            let error = MissingShellError(layout: JailbreakRoot.current)
+            delegate?.session(self, didFailToStart: error)
+            showStartupFailure(error, shell: shell)
+            return
+        }
+
+        // A login shell is started as `-zsh`: the dash is how it knows. The
+        // executable path is ours to exec; argv[0] is the shell's to read, so
+        // a full path in it gets the shell's spelling.
+        let arguments = [Preferences.shared.loginShell ? "-\(defaultTitle)" : JailbreakRoot.toShell(shell)]
 
         var env = TerminalSession.environment()
         // Hand the shell the *logical* working directory as `$PWD`. The kernel
         // resolves the chdir to the physical path regardless, but with `$PWD`
         // set to a logical path that names the same inode, zsh keeps it — so
         // `%~` condenses `~` instead of the full `/private/preboot/...` path.
-        env["PWD"] = workingDirectory
+        env["PWD"] = JailbreakRoot.toShell(workingDirectory)
 
         installPtyHandlers()
         do {
@@ -233,10 +274,12 @@ final class TerminalSession: NSObject {
                           cols: emulator.cols, rows: emulator.rows)
         } catch {
             delegate?.session(self, didFailToStart: error)
-            showStartupFailure(error)
+            showStartupFailure(error, shell: shell)
             return
         }
         isRunning = true
+        startedAt = Date()
+        exitedAt = nil
         pushWindowSize()
         runStartupCommandIfNeeded()
     }
@@ -267,6 +310,7 @@ final class TerminalSession: NSObject {
             guard let self else { return }
             self.isRunning = false
             self.exitCode = code
+            self.exitedAt = Date()
             self.drainPendingOutput(all: true)
             self.delegate?.session(self, didExitWith: code)
         }
@@ -283,10 +327,24 @@ final class TerminalSession: NSObject {
         }
     }
 
-    private func showStartupFailure(_ error: Error) {
-        let message = "\r\n\u{1B}[1;31mdiffTerm:\u{1B}[0m \(error.localizedDescription)\r\n"
-        emulator.feed(message)
+    private func showStartupFailure(_ error: Error, shell: String) {
+        emulator.feed(Diagnostics.terminalReport(
+            headline: error.localizedDescription,
+            facts: Diagnostics.facts(shell: shell, workingDirectory: workingDirectory)))
         view?.setNeedsDisplay()
+    }
+
+    /// The report for a shell that stopped as soon as it started. The shell's
+    /// own last words, if it had any, are already on screen above this.
+    func failedOnArrivalReport() -> String {
+        let code = exitCode ?? 0
+        var headline = "The shell stopped as soon as it started (status \(code)"
+        if let meaning = Diagnostics.meaning(ofExitStatus: code) { headline += ": \(meaning)" }
+        headline += ")."
+        return Diagnostics.terminalReport(
+            headline: headline,
+            facts: Diagnostics.facts(shell: TerminalSession.resolvedShell(),
+                                     workingDirectory: workingDirectory))
     }
 
     func stop() {
@@ -476,8 +534,10 @@ final class TerminalSession: NSObject {
 
     // MARK: - Environment
 
+    /// The shell to exec, in the app's spelling.
     static func resolvedShell() -> String {
-        let configured = Preferences.shared.shellPath.trimmingCharacters(in: .whitespaces)
+        let configured = JailbreakRoot.fromShell(
+            Preferences.shared.shellPath.trimmingCharacters(in: .whitespaces))
         if !configured.isEmpty, FileManager.default.isExecutableFile(atPath: configured) {
             return configured
         }
@@ -490,11 +550,8 @@ final class TerminalSession: NSObject {
         // Otherwise prefer a full-featured shell, but never fail to open a
         // terminal over it.
         let candidates = [
-            "/var/jb/usr/bin/zsh", "/var/jb/bin/zsh",
-            "/var/jb/usr/bin/bash", "/var/jb/bin/bash",
-            "/var/jb/usr/bin/sh", "/var/jb/bin/sh",
-            "/bin/sh",
-        ]
+            "/usr/bin/zsh", "/bin/zsh", "/usr/bin/bash", "/bin/bash", "/usr/bin/sh", "/bin/sh",
+        ].map(JailbreakRoot.jb) + ["/bin/sh"]
         for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
             return path
         }
@@ -518,12 +575,14 @@ final class TerminalSession: NSObject {
         case .home:
             return isDirectory(home) ? home : "/"
         case .root:
-            return "/"
+            // The root the shell will show as `/`, which on roothide is the
+            // bootstrap's rather than the device's.
+            return JailbreakRoot.fromShell("/")
         case .lastUsed:
-            let last = Preferences.shared.lastWorkingDirectory
+            let last = JailbreakRoot.fromShell(Preferences.shared.lastWorkingDirectory)
             return isDirectory(last) ? last : home
         case .custom:
-            let custom = Preferences.shared.customStartDirectory
+            let custom = JailbreakRoot.fromShell(Preferences.shared.customStartDirectory)
             return isDirectory(custom) ? custom : home
         }
     }
@@ -537,10 +596,12 @@ final class TerminalSession: NSObject {
             env[key] = value
         }
 
-        let jbPath = "/var/jb/usr/bin:/var/jb/bin:/var/jb/usr/sbin:/var/jb/sbin"
-        let systemPath = "/usr/bin:/bin:/usr/sbin:/sbin"
+        // Every directory here is in the app's spelling until the end, where
+        // the whole list is translated for the shell that will search it.
+        let jbPath = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"].map(JailbreakRoot.jb)
+        let systemPath = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
         let existing = env["PATH"] ?? ""
-        var parts = "\(jbPath):\(systemPath)".components(separatedBy: ":")
+        var parts = jbPath + systemPath
         for p in existing.components(separatedBy: ":") where !p.isEmpty && !parts.contains(p) {
             parts.append(p)
         }
@@ -556,7 +617,7 @@ final class TerminalSession: NSObject {
                 env["DIFFTERM_CLIPBOARD"] = socket
             }
         }
-        env["PATH"] = parts.joined(separator: ":")
+        env["PATH"] = parts.map(JailbreakRoot.toShell).joined(separator: ":")
 
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
@@ -584,13 +645,14 @@ final class TerminalSession: NSObject {
         // HOME must match the passwd database the rest of the bootstrap uses,
         // or the shell reads no rc files, ssh finds no keys and git finds no
         // config — all while appearing to work.
-        env["HOME"] = UserEnvironment.home
+        env["HOME"] = JailbreakRoot.toShell(UserEnvironment.home)
         env["USER"] = UserEnvironment.userName
         env["LOGNAME"] = UserEnvironment.userName
-        env["SHELL"] = resolvedShell()
-        env["TMPDIR"] = "/var/tmp"
-        if env["TERMINFO"] == nil, FileManager.default.fileExists(atPath: "/var/jb/usr/share/terminfo") {
-            env["TERMINFO"] = "/var/jb/usr/share/terminfo"
+        env["SHELL"] = JailbreakRoot.toShell(resolvedShell())
+        env["TMPDIR"] = JailbreakRoot.toShell("/var/tmp")
+        let terminfo = JailbreakRoot.jb("/usr/share/terminfo")
+        if env["TERMINFO"] == nil, FileManager.default.fileExists(atPath: terminfo) {
+            env["TERMINFO"] = JailbreakRoot.toShell(terminfo)
         }
 
         // These leak the app's own sandbox into the child and confuse tools
@@ -638,12 +700,14 @@ extension TerminalSession: EmulatorDelegate {
     }
 
     func emulator(_ emulator: Emulator, didSetWorkingDirectory path: String) {
-        // Keep the logical form so the prompt stays condensed (`~/proj`) and
-        // the stored directory survives a reboot that renames the physical
-        // jailbreak root.
-        let logical = UserEnvironment.logicalPath(path)
+        // The shell reports its directory in its own spelling. Keep the logical
+        // form so the prompt stays condensed (`~/proj`) and the stored
+        // directory survives a reboot that renames the physical jailbreak root
+        // — and store it in the shell's spelling, which survives a roothide
+        // reinstall renaming the whole bootstrap.
+        let logical = UserEnvironment.logicalPath(JailbreakRoot.fromShell(path))
         workingDirectory = logical
-        Preferences.shared.lastWorkingDirectory = logical
+        Preferences.shared.lastWorkingDirectory = JailbreakRoot.toShell(logical)
     }
 
     func emulator(_ emulator: Emulator, didRequestClipboardWrite text: String) {

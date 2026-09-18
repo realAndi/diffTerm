@@ -65,9 +65,10 @@ enum ShellIntegrationInstaller {
         return FileManager.default.fileExists(atPath: path) ? path : nil
     }
 
-    /// The line appended to the rc file.
+    /// The line appended to the rc file, which the shell reads — so the path
+    /// in it is in the shell's spelling.
     static func sourceLine(for shell: Shell) -> String {
-        let path = scriptPath(for: shell)
+        let path = JailbreakRoot.toShell(scriptPath(for: shell))
         switch shell {
         case .fish:
             return "test -f \(path); and source \(path)"
@@ -96,19 +97,34 @@ enum ShellIntegrationInstaller {
 
     enum InstallError: LocalizedError {
         case scriptMissing
-        case writeFailed(String)
-        case readFailed(String)
+        case writeFailed(String, reason: String)
+        case readFailed(String, reason: String)
 
         var errorDescription: String? {
             switch self {
             case .scriptMissing:
-                return "The integration script is missing from the app bundle."
-            case .writeFailed(let path):
-                return "Could not write to \(path)."
-            case .readFailed(let path):
-                return "Could not read \(path), so it was left untouched."
+                return "The integration script is missing from the app bundle, "
+                    + "which means the install is damaged. Reinstalling diffTerm should fix it."
+            case .writeFailed(let path, let reason):
+                return "Could not write to \(path): \(reason)."
+            case .readFailed(let path, let reason):
+                return "Could not read \(path), so it was left untouched: \(reason)."
             }
         }
+
+        /// The system's own words for what went wrong. Foundation wraps the
+        /// errno in a sentence about "the file"; the errno is the useful part.
+        static func reason(for error: Error) -> String {
+            let ns = error as NSError
+            if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError,
+               underlying.domain == NSPOSIXErrorDomain {
+                return String(cString: strerror(Int32(underlying.code)))
+            }
+            if ns.domain == NSPOSIXErrorDomain { return String(cString: strerror(Int32(ns.code))) }
+            return ns.localizedDescription
+        }
+
+        static var errnoReason: String { String(cString: strerror(errno)) }
     }
 
     /// Copies the script out and adds the source line, once.
@@ -130,7 +146,7 @@ enum ShellIntegrationInstaller {
         do {
             try fm.copyItem(atPath: source, toPath: destination)
         } catch {
-            throw InstallError.writeFailed(destination)
+            throw InstallError.writeFailed(destination, reason: InstallError.reason(for: error))
         }
 
         let rc = shell.rcPath
@@ -140,13 +156,18 @@ enum ShellIntegrationInstaller {
             try? fm.createDirectory(atPath: (rc as NSString).deletingLastPathComponent,
                                     withIntermediateDirectories: true, attributes: nil)
             guard fm.createFile(atPath: rc, contents: addition) else {
-                throw InstallError.writeFailed(rc)
+                throw InstallError.writeFailed(rc, reason: InstallError.errnoReason)
             }
             return
         }
 
         // A file that exists but cannot be read is not an empty file.
-        guard let contents = fm.contents(atPath: rc) else { throw InstallError.readFailed(rc) }
+        let contents: Data
+        do {
+            contents = try Data(contentsOf: URL(fileURLWithPath: rc))
+        } catch {
+            throw InstallError.readFailed(rc, reason: InstallError.reason(for: error))
+        }
         guard contents.range(of: Data(marker.utf8)) == nil else { return }
         if let last = contents.last, last != UInt8(ascii: "\n") {
             addition.insert(UInt8(ascii: "\n"), at: 0)
@@ -157,7 +178,7 @@ enum ShellIntegrationInstaller {
             try handle.seekToEnd()
             try handle.write(contentsOf: addition)
         } catch {
-            throw InstallError.writeFailed(rc)
+            throw InstallError.writeFailed(rc, reason: InstallError.reason(for: error))
         }
     }
 

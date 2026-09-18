@@ -3,24 +3,30 @@
 # There is no Xcode here, so this drives clang/swiftc directly and assembles
 # the .app bundle by hand.
 
-# The rootless bootstrap has no /bin/sh, so make needs to be told — but a
-# Mac (or a CI runner) doing a cross-build has one. $(wildcard), not $(shell):
-# $(shell) runs through SHELL itself, which on-device does not exist yet.
-SHELL        := $(if $(wildcard /var/jb/bin/sh),/var/jb/bin/sh,/bin/sh)
+# Where the bootstrap is, as the build tools see it: /var/jb on a rootless
+# jailbreak; empty on roothide, whose tools see the bootstrap as `/` and the
+# real root as /rootfs (docs/ROOTHIDE.md), on rootful, and on a Mac.
+# $(wildcard), not $(shell): $(shell) runs through SHELL itself, which is set
+# from this and on-device does not exist yet.
+HOST_JB      := $(if $(wildcard /var/jb/bin/sh),/var/jb,)
+
+# The rootless bootstrap has no /bin/sh, so make needs to be told — but
+# everywhere else (roothide, rootful, a Mac or a CI runner) has one.
+SHELL        := $(HOST_JB)/bin/sh
 
 # Overridable so a second copy can be installed alongside the first:
 #   make install APP_NAME=diffTermDev BUNDLE_ID=dev.diffterm.appdev DISPLAY_NAME="diffTerm (dev)"
 APP_NAME     ?= diffTerm
 BUNDLE_ID    ?= dev.diffterm.app
 DISPLAY_NAME ?= $(APP_NAME)
-VERSION      ?= 2.2.1
+VERSION      ?= 2.2.2
 
 # Only the primary install owns the pbcopy/pbpaste links.
 PRIMARY_ID   := dev.diffterm.app
 
 # The on-device SDK ships with the bootstrap; a cross-build (Mac, CI) uses
 # Xcode's — the xcrun only runs where a /bin/sh exists. Overridable anyway.
-SDK          ?= $(if $(wildcard /var/jb/usr/share/SDKs/iPhoneOS.sdk),/var/jb/usr/share/SDKs/iPhoneOS.sdk,$(shell xcrun --sdk iphoneos --show-sdk-path))
+SDK          ?= $(if $(wildcard $(HOST_JB)/usr/share/SDKs/iPhoneOS.sdk),$(HOST_JB)/usr/share/SDKs/iPhoneOS.sdk,$(shell xcrun --sdk iphoneos --show-sdk-path))
 # One definition. Building for ios16.0 while Info.plist claimed 15.0 meant the
 # binary refused to launch on the very systems the plist invited it onto.
 DEPLOY_MIN   := 14.0
@@ -36,14 +42,14 @@ BINARY       := $(APP)/$(APP_NAME)
 # which is what `make install` from a terminal on the device wants anyway.
 SUDO         := $(if $(SUDO_ASKPASS),sudo -A,sudo)
 
-INSTALL_DIR  := /var/jb/Applications
+INSTALL_DIR  := $(HOST_JB)/Applications
 INSTALLED    := $(INSTALL_DIR)/$(APP_NAME).app
 
 # Where pbcopy/pbpaste are linked from. /var/jb/etc/zprofile replaces PATH
 # outright for login shells, but its standard PATH puts /var/jb/usr/local/bin
 # ahead of /var/jb/usr/bin, so a link here wins either way and leaves the
 # bootstrap's own package untouched.
-LOCAL_BIN    := /var/jb/usr/local/bin
+LOCAL_BIN    := $(HOST_JB)/usr/local/bin
 
 SWIFT_SRC    := $(wildcard Sources/Core/*.swift) \
                 $(wildcard Sources/Settings/*.swift) \
@@ -224,18 +230,22 @@ run: install
 	@killall -9 $(APP_NAME) 2>/dev/null || true
 	@uiopen --bundleid $(BUNDLE_ID)
 
+# A package for this device's own jailbreak. Released packages, one per kind
+# of jailbreak, come from tools/build-deb.sh.
+PKG_ARCH     := $(if $(HOST_JB),iphoneos-arm64,$(if $(wildcard /rootfs),iphoneos-arm64e,iphoneos-arm))
+
 package: $(BINARY)
-	@echo "  DEB   $(BUILD)/$(APP_NAME)_$(VERSION).deb"
+	@echo "  DEB   $(BUILD)/$(APP_NAME)_$(VERSION).deb ($(PKG_ARCH))"
 	@rm -rf $(BUILD)/deb
-	@mkdir -p $(BUILD)/deb/DEBIAN $(BUILD)/deb/var/jb/Applications
-	@cp -R $(APP) $(BUILD)/deb/var/jb/Applications/
-	@printf 'Package: %s\nName: %s\nVersion: %s\nArchitecture: iphoneos-arm64\nDescription: A modern terminal emulator for jailbroken iOS.\nMaintainer: diffTerm\nAuthor: diffTerm\nSection: Terminal_Support\nDepends: firmware (>= $(DEPLOY_MIN))\nTag: role::hacker\n' \
+	@mkdir -p $(BUILD)/deb/DEBIAN $(BUILD)/deb$(HOST_JB)/Applications
+	@cp -R $(APP) $(BUILD)/deb$(HOST_JB)/Applications/
+	@printf 'Package: %s\nName: %s\nVersion: %s\nArchitecture: $(PKG_ARCH)\nDescription: A modern terminal emulator for jailbroken iOS.\nMaintainer: diffTerm\nAuthor: diffTerm\nSection: Terminal_Support\nDepends: firmware (>= $(DEPLOY_MIN))\nTag: role::hacker\n' \
 		"$(BUNDLE_ID)" "$(APP_NAME)" "$(VERSION)" > $(BUILD)/deb/DEBIAN/control
 	# The same maintainer scripts the published package ships, so an upgrade
 	# from a local build gets the same cleanup. Only the app they register
 	# follows APP_NAME.
 	@for script in postinst prerm; do \
-	   sed 's|^APP=.*|APP=$(INSTALLED)|' packaging/DEBIAN/$$script > $(BUILD)/deb/DEBIAN/$$script; \
+	   sed -e 's|^APP=.*|APP=$(INSTALLED)|' -e 's|@JB@|$(HOST_JB)|g' packaging/DEBIAN/$$script > $(BUILD)/deb/DEBIAN/$$script; \
 	 done
 	@chmod 755 $(BUILD)/deb/DEBIAN/postinst $(BUILD)/deb/DEBIAN/prerm
 	# --root-owner-group: build as any user, install as root.

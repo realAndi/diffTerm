@@ -80,7 +80,7 @@
           "class": "DepictionMarkdownView",
           "useSpacing": true,
           "useRawFormat": false,
-          "markdown": "- A rootless jailbreak (`/var/jb`), iOS 14 or later, arm64.\n- Nothing else: everything it needs ships in the package.\n\nThe iPad layout is implemented but has not been run on real hardware."
+          "markdown": "- A jailbroken iPhone or iPad on iOS 14 or later, arm64.\n- Rootless (Dopamine, palera1n), roothide (Serotonin with Bootstrap, Relaxin) or rootful (palera1n in rootful mode). Your package manager picks the matching package.\n- Nothing else: everything it needs ships in the package.\n\nThe iPad layout is implemented but has not been run on real hardware."
         }
       ]
     },
@@ -100,6 +100,24 @@
           "useSpacing": true,
           "useRawFormat": false,
           "markdown": "**Updates.** Builds publish automatically from the source repository. Every version stays downloadable here, so rolling back is a normal package-manager operation."
+        }
+      ]
+    },
+    {
+      "class": "DepictionStackView",
+      "tabname": "Changelog",
+      "views": [
+        {
+          "class": "DepictionSubheaderView",
+          "title": "2.2.2",
+          "useBoldText": true,
+          "useBottomMargin": true
+        },
+        {
+          "class": "DepictionMarkdownView",
+          "useSpacing": true,
+          "useRawFormat": false,
+          "markdown": "- RootHide compatibility.\n- Better Error Logging"
         }
       ]
     }

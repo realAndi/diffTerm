@@ -336,10 +336,12 @@ struct CommandValidator: CommandValidating {
             || argument.hasPrefix("/") || argument.hasPrefix("~/")
     }
 
-    /// Where a path argument points from the shell's point of view.
+    /// Where a path argument points from the shell's point of view, spelled
+    /// for the app to look at. The argument was typed in the shell's spelling;
+    /// `cwd` and `home` are already in the app's.
     private func resolve(_ path: String, cwd: String) -> String {
         if path.hasPrefix("~") { return UserEnvironment.home + String(path.dropFirst()) }
-        if path.hasPrefix("/") { return path }
+        if path.hasPrefix("/") { return JailbreakRoot.fromShell(path) }
         return cwd + "/" + path
     }
 }

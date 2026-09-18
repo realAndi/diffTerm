@@ -95,7 +95,7 @@ enum StartDirectory: String, CaseIterable {
     var detail: String? {
         switch self {
         case .deviceHome: return "Outside the bootstrap, so it survives reinstalling the jailbreak."
-        case .home:       return "Where your dotfiles live. Inside /var/jb, which a jailbreak reinstall replaces."
+        case .home:       return "Where your dotfiles live. Inside the jailbreak, which a reinstall replaces."
         case .root:       return nil
         case .lastUsed:   return "Wherever the last terminal ended up."
         case .custom:     return nil
@@ -547,9 +547,11 @@ final class Preferences {
         }
     }
 
+    /// In the shell's spelling, like every stored path: it is what the user
+    /// typed, and it has no random roothide part to go stale.
     @Stored("customStartDirectory", "") private var customStartDirStored: String
     var customStartDirectory: String {
-        get { customStartDirStored.isEmpty ? UserEnvironment.deviceHome : customStartDirStored }
+        get { customStartDirStored.isEmpty ? JailbreakRoot.toShell(UserEnvironment.deviceHome) : customStartDirStored }
         set {
             guard newValue != customStartDirStored else { return }
             customStartDirStored = newValue
@@ -573,9 +575,10 @@ final class Preferences {
 
     /// Updated as sessions report their cwd via OSC 7, so a new tab can open
     /// where the last one left off.
+    /// In the shell's spelling; see `customStartDirectory`.
     @Stored("lastWorkingDirectory", "") private var lastWorkingDirectoryStored: String
     var lastWorkingDirectory: String {
-        get { lastWorkingDirectoryStored.isEmpty ? UserEnvironment.deviceHome : lastWorkingDirectoryStored }
+        get { lastWorkingDirectoryStored.isEmpty ? JailbreakRoot.toShell(UserEnvironment.deviceHome) : lastWorkingDirectoryStored }
         set { lastWorkingDirectoryStored = newValue }
     }
 

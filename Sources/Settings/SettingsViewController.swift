@@ -210,8 +210,18 @@ final class SettingsViewController: SettingsTableViewController {
                 } catch {
                     let failure = UIAlertController(
                         title: "Could Not Install",
-                        message: error.localizedDescription, preferredStyle: .alert)
-                    failure.addAction(UIAlertAction(title: "OK", style: .default))
+                        message: error.localizedDescription
+                            + "\n\nIf this keeps happening, please report it on GitHub.",
+                        preferredStyle: .alert)
+                    failure.addAction(UIAlertAction(title: "OK", style: .cancel))
+                    let report = Diagnostics.newIssueURL(
+                        headline: "Could not install \(shell.rawValue) shell integration: \(error.localizedDescription)",
+                        facts: Diagnostics.facts(shell: TerminalSession.resolvedShell(), workingDirectory: nil))
+                    if let url = URL(string: report) {
+                        failure.addAction(UIAlertAction(title: "Report on GitHub", style: .default) { _ in
+                            UIApplication.shared.open(url)
+                        })
+                    }
                     host?.present(failure, animated: true)
                 }
             })
@@ -479,20 +489,25 @@ final class SettingsViewController: SettingsTableViewController {
         pushPicker(from: host, title: "Font", options: options)
     }
 
+    /// The list is checked in the app's spelling and shown and stored in the
+    /// shell's, which is what `pwd` and `echo $SHELL` would say.
     private func pushShellPicker(from host: UIViewController) {
-        var candidates = ["/var/jb/usr/bin/zsh", "/var/jb/usr/bin/bash",
-                          "/var/jb/usr/bin/sh", "/var/jb/usr/bin/dash",
-                          "/var/jb/bin/sh", "/bin/sh"]
+        var candidates = ["/usr/bin/zsh", "/usr/bin/bash", "/usr/bin/sh", "/usr/bin/dash", "/bin/sh"]
+            .map(JailbreakRoot.jb)
+        if !candidates.contains("/bin/sh") { candidates.append("/bin/sh") }
         // Anything the user configured by hand stays in the list even if it
         // is not one of ours.
         let configured = prefs.shellPath
-        if !configured.isEmpty, !candidates.contains(configured) { candidates.insert(configured, at: 0) }
-        let available = candidates.filter { FileManager.default.isExecutableFile(atPath: $0) }
+        let configuredPath = JailbreakRoot.fromShell(configured)
+        if !configured.isEmpty, !candidates.contains(configuredPath) { candidates.insert(configuredPath, at: 0) }
+        let available = candidates
+            .filter { FileManager.default.isExecutableFile(atPath: $0) }
+            .map(JailbreakRoot.toShell)
 
         var options: [ListPickerController.Option] = [
             ListPickerController.Option(
                 title: "Automatic",
-                subtitle: TerminalSession.resolvedShell(),
+                subtitle: JailbreakRoot.toShell(TerminalSession.resolvedShell()),
                 swatch: nil,
                 isSelected: configured.isEmpty,
                 select: { [weak self] in

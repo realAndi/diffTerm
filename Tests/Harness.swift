@@ -44,6 +44,7 @@ struct Harness {
         shellIntegrationTests()
         sessionRestoreTests()
         logicalPathTests()
+        jailbreakRootTests()
         localeTests()
         startDirectoryTests()
         iconTests()
@@ -70,6 +71,7 @@ struct Harness {
         colorSchemeTests()
         pathValidationTests()
         shellCompletionTests()
+        errorReportingTests()
         restoreMarkTests()
         liveSnapshotProbe()
         glyphPresentationTests()
@@ -3178,6 +3180,250 @@ struct Harness {
                    "$LC_ALL names a complete locale", "got \(all)")
         }
 
+        print("")
+    }
+
+    // MARK: - Jailbreak root
+
+    /// The two spellings of every path on roothide, and the identity everywhere
+    /// else. None of this needs a roothide device: the layouts are built by
+    /// hand, and discovery runs against a directory tree made for it. What it
+    /// cannot show is that roothide's own tools behave as documented — that
+    /// part is docs/ROOTHIDE.md's list of things to try on one.
+    static func jailbreakRootTests() {
+        print("jailbreak root")
+        typealias Layout = JailbreakRoot.Layout
+
+        let root = "/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF"
+        let hide = Layout(scheme: .roothide, prefix: root, physical: nil)
+
+        expectEqual(hide.jb("/usr/bin/zsh"), root + "/usr/bin/zsh",
+                    "roothide: a bootstrap path is under the random root")
+        expectEqual(hide.jb("/"), root, "roothide: and the bootstrap's / is that root")
+
+        // Out of the shell.
+        expectEqual(hide.fromShell("/usr/bin/zsh"), root + "/usr/bin/zsh",
+                    "roothide: the shell's /usr/bin is the bootstrap's")
+        expectEqual(hide.fromShell("/rootfs/var/mobile/Documents"), "/var/mobile/Documents",
+                    "roothide: the shell's /rootfs is the device's root")
+        expectEqual(hide.fromShell("/rootfs"), "/", "roothide: /rootfs itself is /")
+        expectEqual(hide.fromShell("/"), root, "roothide: the shell's / is the bootstrap")
+        expectEqual(hide.fromShell("/rootfsx/a"), root + "/rootfsx/a",
+                    "roothide: a name that only starts like /rootfs is not it")
+        expectEqual(hide.fromShell("src/main.c"), "src/main.c",
+                    "roothide: a relative path is spelled the same by both")
+        expectEqual(hide.fromShell(hide.fromShell("/usr/bin")), root + "/usr/bin",
+                    "roothide: translating a shell path twice is harmless")
+
+        // Into the shell.
+        expectEqual(hide.toShell(root + "/usr/bin/zsh"), "/usr/bin/zsh",
+                    "roothide: the shell is told bootstrap paths without the random root")
+        expectEqual(hide.toShell(root), "/", "roothide: the root itself is the shell's /")
+        expectEqual(hide.toShell("/var/mobile"), "/rootfs/var/mobile",
+                    "roothide: a device path reaches the shell through /rootfs")
+        expectEqual(hide.toShell("/"), "/rootfs", "roothide: the device's / is the shell's /rootfs")
+        expectEqual(hide.toShell("/rootfs/var/mobile"), "/rootfs/var/mobile",
+                    "roothide: a /rootfs path is already the shell's")
+        expectEqual(hide.toShell(root + "extra/x"), "/rootfs" + root + "extra/x",
+                    "roothide: a name that only starts like the root is not under it")
+
+        for path in [root + "/var/mobile/proj", "/var/mobile/Documents", "/", root] {
+            expectEqual(hide.fromShell(hide.toShell(path)), path, "roothide: \(path) survives a round trip")
+        }
+        for path in ["/usr/bin/zsh", "/rootfs/var/mobile", "/", "/rootfs"] {
+            expectEqual(hide.toShell(hide.fromShell(path)), path, "roothide: the shell's \(path) survives a round trip")
+        }
+
+        // The resolved spelling of the root, which getcwd hands back.
+        let preboot = "/private/preboot/ABC/jb-XYZ"
+        let linked = Layout(scheme: .roothide, prefix: root, physical: preboot)
+        expectEqual(linked.toShell(preboot + "/var/mobile"), "/var/mobile",
+                    "roothide: the root's resolved spelling is recognised too")
+        expectEqual(linked.fromShell(preboot + "/usr/bin"), root + "/usr/bin",
+                    "roothide: and comes back under the stable name")
+        expect(linked.contains(preboot + "/x") && linked.contains(root + "/x")
+               && !linked.contains("/var/mobile"),
+               "roothide: both spellings are inside the bootstrap, the device is not")
+
+        // Rootless and rootful: one spelling, so every translation is a no-op.
+        let less = Layout(scheme: .rootless, prefix: "/var/jb", physical: preboot)
+        expectEqual(less.jb("/usr/bin/zsh"), "/var/jb/usr/bin/zsh", "rootless: bootstrap paths are under /var/jb")
+        for path in ["/usr/bin/zsh", "/var/jb/usr/bin", "/var/mobile", "/", "rel/x", preboot + "/x"] {
+            expect(less.toShell(path) == path && less.fromShell(path) == path,
+                   "rootless: \(path) is spelled the same by the app and the shell")
+        }
+        expectEqual(less.canonical(preboot + "/var/mobile"), "/var/jb/var/mobile",
+                    "rootless: the resolved root maps back to /var/jb")
+        let full = Layout(scheme: .rootful, prefix: "", physical: nil)
+        expectEqual(full.jb("/usr/bin/zsh"), "/usr/bin/zsh", "rootful: bootstrap paths are the real ones")
+        expectEqual(full.jb("/"), "/", "rootful: and the root is the root")
+        expect(full.toShell("/var/mobile") == "/var/mobile" && full.fromShell("/usr/bin") == "/usr/bin",
+               "rootful: both spellings are the same")
+        expect(!full.contains("/usr/bin"), "rootful: nothing is inside a bootstrap")
+
+        expect(JailbreakRoot.isRoothideName(".jbroot-0123456789abcdef"),
+               "a .jbroot- name with sixteen hex digits is roothide's")
+        expect(!JailbreakRoot.isRoothideName(".jbroot-0123456789abcde"), "fifteen is not")
+        expect(!JailbreakRoot.isRoothideName(".jbroot-0123456789abcdeg"), "nor a digit that is not hex")
+        expect(!JailbreakRoot.isRoothideName("jbroot-0123456789abcdef"), "nor the name without its dot")
+
+        // Discovery, against a tree laid out like each kind of jailbreak.
+        let fm = FileManager.default
+        func real(_ path: String) -> String {
+            var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+            return realpath(path, &buffer) != nil ? String(cString: buffer) : path
+        }
+        let tree = real(NSTemporaryDirectory()) + "/dt-jbroot-\(getpid())"
+        try? fm.removeItem(atPath: tree)
+        defer { try? fm.removeItem(atPath: tree) }
+        let containers = tree + "/containers"
+        let jbroot = containers + "/.jbroot-00112233445566AA"
+        let bundle = tree + "/App.app"
+        let rootless = tree + "/jb"
+        let missing = tree + "/nothing-here"
+        for dir in [jbroot + "/usr/bin", bundle, rootless, containers + "/.jbroot-stale/usr/bin"] {
+            try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        }
+
+        let scanned = JailbreakRoot.discover(bundlePath: bundle, containers: containers, rootless: missing)
+        expectEqual(scanned.scheme, .roothide, "discovery: a .jbroot- directory holding a bootstrap is roothide")
+        expectEqual(scanned.prefix, jbroot, "discovery: and it is the prefix")
+
+        try? fm.createSymbolicLink(atPath: bundle + "/.jbroot", withDestinationPath: jbroot)
+        let viaBundle = JailbreakRoot.discover(bundlePath: bundle, containers: containers, rootless: rootless)
+        expectEqual(viaBundle.scheme, .roothide, "discovery: a .jbroot link beside the app outranks /var/jb")
+        expectEqual(viaBundle.prefix, jbroot, "discovery: and names the root the way the system does")
+        let aside = tree + "/elsewhere/.jbroot-FFEEDDCCBBAA9988"
+        try? fm.createDirectory(atPath: aside + "/usr/bin", withIntermediateDirectories: true)
+        try? fm.removeItem(atPath: bundle + "/.jbroot")
+        try? fm.createSymbolicLink(atPath: bundle + "/.jbroot", withDestinationPath: aside)
+        expectEqual(JailbreakRoot.discover(bundlePath: bundle, containers: containers, rootless: rootless).prefix,
+                    aside, "discovery: the link wins even over a different root in the containers")
+        try? fm.removeItem(atPath: bundle + "/.jbroot")
+
+        expectEqual(JailbreakRoot.discover(bundlePath: bundle, containers: containers, rootless: rootless).scheme,
+                    .rootless, "discovery: without the link, /var/jb means rootless")
+        let rootlessLink = tree + "/jblink"
+        try? fm.createSymbolicLink(atPath: rootlessLink, withDestinationPath: rootless)
+        let viaLink = JailbreakRoot.discover(bundlePath: bundle, containers: missing, rootless: rootlessLink)
+        expectEqual(viaLink.physical, real(rootless), "discovery: a linked /var/jb records where it leads")
+        expectEqual(viaLink.canonical(real(rootless) + "/usr"), rootlessLink + "/usr",
+                    "discovery: and maps that back")
+
+        // palera1n rootful can carry a /var/jb that is only a link to /.
+        let compat = tree + "/jb-to-root"
+        try? fm.createSymbolicLink(atPath: compat, withDestinationPath: "/")
+        expectEqual(JailbreakRoot.discover(bundlePath: bundle, containers: missing, rootless: compat),
+                    Layout(scheme: .rootful, prefix: "", physical: nil),
+                    "discovery: a /var/jb that links to / is rootful, not a bootstrap")
+
+        let bad = tree + "/bad"
+        try? fm.createDirectory(atPath: bad + "/.jbroot-notsixteenhexdigits/usr/bin", withIntermediateDirectories: true)
+        expectEqual(JailbreakRoot.discover(bundlePath: bundle, containers: bad, rootless: missing).scheme,
+                    .rootful, "discovery: a .jbroot- directory of the wrong shape is ignored")
+        expectEqual(JailbreakRoot.discover(bundlePath: bundle, containers: missing, rootless: missing),
+                    Layout(scheme: .rootful, prefix: "", physical: nil),
+                    "discovery: no bootstrap anywhere is rootful")
+
+        // This device, as it really is. Rootless here, so every boundary the
+        // app crosses must hand paths over unchanged.
+        if fm.fileExists(atPath: "/var/jb") {
+            expectEqual(JailbreakRoot.scheme, .rootless, "this device: rootless")
+            expectEqual(JailbreakRoot.jb("/usr/bin/zsh"), "/var/jb/usr/bin/zsh", "this device: the bootstrap is at /var/jb")
+            let env = TerminalSession.environment()
+            expect(env["PATH"]?.hasPrefix("/var/jb/usr/bin:") == true || env["PATH"]?.contains("/helpers:/var/jb/usr/bin:") == true,
+                   "this device: PATH still leads with the bootstrap", env["PATH"] ?? "nil")
+            expectEqual(env["HOME"], UserEnvironment.home, "this device: HOME is handed over as found")
+        } else {
+            print("  · no /var/jb here; the live checks are for a rootless device")
+        }
+
+        print("")
+    }
+
+    // MARK: - Error reporting
+
+    /// A shell that could not be run used to show only "exited with status
+    /// 127", which is all a Serotonin + roothide Bootstrap user could report.
+    /// The child now says what it tried and why it failed, and the app adds
+    /// what it knows about the device and a link to report it. The spawn runs
+    /// several times because nothing orders the pty's read against its exit
+    /// notice, and the explanation would be lost if the exit won.
+    static func errorReportingTests() {
+        print("error reporting")
+
+        let missing = "/var/empty/diffterm-no-such-shell"
+        var delivered = 0, exitedWith127 = 0
+        let runs = 25
+        for _ in 0..<runs {
+            let pty = Pty()
+            let lock = NSLock()
+            var output: [UInt8] = []
+            var code: Int32?
+            pty.onRead = { chunk in lock.lock(); output += chunk; lock.unlock() }
+            pty.onExit = { code = $0 }
+            do {
+                try pty.start(executable: missing, arguments: [missing], environment: [:],
+                              workingDirectory: "/", cols: 80, rows: 24)
+            } catch {
+                expect(false, "a missing executable still forks", "\(error)"); break
+            }
+            // Generous: a loaded device can take seconds to reap, and a
+            // timeout here would read as the explanation going missing.
+            let deadline = Date().addingTimeInterval(15)
+            while code == nil, Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+            }
+            lock.lock()
+            let text = String(decoding: output, as: UTF8.self)
+            lock.unlock()
+            if text.contains("couldn't run \(missing): no such file (errno 2)") { delivered += 1 }
+            if code == 127 { exitedWith127 += 1 }
+        }
+        expectEqual(exitedWith127, runs, "a failed exec exits 127")
+        expectEqual(delivered, runs, "and says which file and why, every time")
+
+        let none = MissingShellError(layout: .init(scheme: .rootful, prefix: "", physical: nil))
+        expect(none.localizedDescription.contains("no jailbreak bootstrap"),
+               "with no bootstrap, the startup error says so", none.localizedDescription)
+        let root = "/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF"
+        let hidden = MissingShellError(layout: .init(scheme: .roothide, prefix: root, physical: nil))
+        expect(hidden.localizedDescription.contains(root + "/usr/bin"),
+               "with one, it names where it looked", hidden.localizedDescription)
+
+        expectEqual(Diagnostics.meaning(ofExitStatus: 127), "a program could not be found or started",
+                    "127 is explained")
+        expect(Diagnostics.meaning(ofExitStatus: 137)?.contains("signal 9") == true,
+               "a signal death names the signal", Diagnostics.meaning(ofExitStatus: 137) ?? "nil")
+        expect(Diagnostics.meaning(ofExitStatus: 1) == nil, "a plain failure is not guessed at")
+
+        let facts = Diagnostics.facts(shell: missing, workingDirectory: "/var/mobile/é")
+        let labels = facts.map { $0.0 }
+        for label in ["version", "system", "jailbreak", "shell", "home", "directory"] {
+            expect(labels.contains(label), "the report includes \(label)")
+        }
+        expect(facts.first { $0.0 == "shell" }?.1.hasSuffix("(missing)") == true,
+               "and says the shell is missing", facts.first { $0.0 == "shell" }?.1 ?? "nil")
+        expect(facts.first { $0.0 == "system" }?.1.hasPrefix("iOS ") == true,
+               "and which iOS it is", facts.first { $0.0 == "system" }?.1 ?? "nil")
+
+        let issue = Diagnostics.newIssueURL(headline: "Couldn't start a shell", facts: facts)
+        expect(URL(string: issue) != nil, "the report link is a valid URL, accents and all", issue)
+        expect(issue.hasPrefix(Diagnostics.issuesURL + "/new?title="), "and opens a new issue", issue)
+        expect(issue.contains("body="), "with the report in its body")
+
+        // Fed through the emulator, as the user would see it.
+        let e = Emulator(cols: 60, rows: 60)
+        e.feed(Diagnostics.terminalReport(headline: "Couldn't start a shell", facts: facts))
+        var screen: [String] = []
+        for row in 0..<e.rows { screen.append(line(e, row)) }
+        let shown = screen.joined(separator: "\n")
+        expect(shown.contains("diffTerm: Couldn't start a shell"), "the headline is on screen")
+        expect(shown.contains(Diagnostics.issuesURL), "the issues page is on screen")
+        let linkRow = screen.firstIndex { $0.contains(Diagnostics.issuesURL) } ?? 0
+        let col = screen[linkRow].range(of: "https").map { screen[linkRow].distance(from: screen[linkRow].startIndex, to: $0.lowerBound) } ?? 0
+        let id = e.buffer.lines[linkRow][col].attrs.linkID
+        expectEqual(e.hyperlinks[id], issue, "and tapping it opens the filled-in issue")
         print("")
     }
 

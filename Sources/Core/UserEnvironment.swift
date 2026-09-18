@@ -12,6 +12,11 @@ import Foundation
 /// `/var/jb/usr/bin/login`, which other terminals exec, reads the bootstrap
 /// database. Matching that is what makes a shell here behave the way the rest
 /// of the system expects.
+///
+/// On roothide the bootstrap's database is written for the bootstrap's own
+/// tools, so the paths in it are in the shell's spelling (`/var/mobile` meaning
+/// the bootstrap's copy) and are translated on the way in. Everything this type
+/// hands out is in the app's spelling; see `JailbreakRoot`.
 enum UserEnvironment {
 
     struct Entry {
@@ -22,8 +27,13 @@ enum UserEnvironment {
         var shell: String
     }
 
-    /// Passwd files consulted in order of authority for this environment.
-    private static let passwdPaths = ["/var/jb/etc/passwd", "/etc/passwd"]
+    /// Passwd files consulted in order of authority for this environment, and
+    /// whether each is written in the shell's spelling. The bootstrap's is; the
+    /// system's is not.
+    private static let passwdSources: [(path: String, shellSpelling: Bool)] = [
+        (JailbreakRoot.jb("/etc/passwd"), true),
+        ("/etc/passwd", false),
+    ]
 
     private static let cached: Entry = resolve()
 
@@ -92,13 +102,14 @@ enum UserEnvironment {
     /// `/private/preboot/<UUID>/...`, which reinstalling or updating the
     /// jailbreak replaces wholesale, taking anything stored under it. The
     /// device's own `/var/mobile` survives that, so it is where a terminal
-    /// should drop you.
+    /// should drop you. On roothide the whole bootstrap is replaced on every
+    /// install, which makes this matter more, not less.
     static var deviceHome: String { cachedDeviceHome }
 
     private static let cachedDeviceHome: String = {
-        if let parsed = parse(path: "/etc/passwd", uid: getuid()),
+        if let parsed = parse(path: "/etc/passwd", uid: getuid(), shellSpelling: false),
            isDirectory(parsed.home),
-           logicalPath(parsed.home) == parsed.home {
+           !JailbreakRoot.current.contains(parsed.home) {
             return parsed.home
         }
         return isDirectory("/var/mobile") ? "/var/mobile" : home
@@ -107,8 +118,9 @@ enum UserEnvironment {
     private static func resolve() -> Entry {
         let uid = getuid()
 
-        for path in passwdPaths {
-            guard let parsed = parse(path: path, uid: uid) else { continue }
+        for source in passwdSources {
+            guard let parsed = parse(path: source.path, uid: uid,
+                                     shellSpelling: source.shellSpelling) else { continue }
             // A home directory that isn't there is worse than no answer; fall
             // through to the next database rather than dropping the user into
             // a directory that does not exist.
@@ -125,12 +137,13 @@ enum UserEnvironment {
             }
         }
 
-        let fallback = isDirectory("/var/jb/var/mobile") ? "/var/jb/var/mobile" : "/var/mobile"
+        let bootstrapHome = JailbreakRoot.jb("/var/mobile")
+        let fallback = isDirectory(bootstrapHome) ? bootstrapHome : "/var/mobile"
         return Entry(name: "mobile", uid: uid, gid: getgid(),
-                     home: fallback, shell: "/var/jb/usr/bin/zsh")
+                     home: fallback, shell: JailbreakRoot.jb("/usr/bin/zsh"))
     }
 
-    private static func parse(path: String, uid: uid_t) -> Entry? {
+    private static func parse(path: String, uid: uid_t, shellSpelling: Bool) -> Entry? {
         guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
         for line in contents.split(separator: "\n") {
             guard !line.hasPrefix("#") else { continue }
@@ -139,26 +152,20 @@ enum UserEnvironment {
                   let entryUID = uid_t(fields[2]),
                   entryUID == uid else { continue }
             let gid = gid_t(fields[3]) ?? getgid()
+            let spell: (Substring) -> String = { field in
+                shellSpelling ? JailbreakRoot.fromShell(String(field)) : String(field)
+            }
             return Entry(name: String(fields[0]),
                          uid: entryUID,
                          gid: gid,
-                         home: String(fields[5]),
-                         shell: String(fields[6]))
+                         home: spell(fields[5]),
+                         shell: spell(fields[6]))
         }
         return nil
     }
 
-    /// The physical path `/var/jb` resolves to — e.g. on a Dopamine jailbreak,
-    /// `/private/preboot/<UUID>/<name>/procursus`. Computed once.
-    private static let jailbreakPhysicalRoot: String? = {
-        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
-        guard realpath("/var/jb", &buffer) != nil else { return nil }
-        let resolved = String(cString: buffer)
-        // Only meaningful if `/var/jb` is actually a link to somewhere else.
-        return resolved == "/var/jb" ? nil : resolved
-    }()
-
-    /// Rewrites a fully-resolved path back to its logical `/var/jb/...` form.
+    /// Rewrites a fully-resolved path back to its logical `/var/jb/...` form —
+    /// or, on roothide, to the `.jbroot-…` name. See `JailbreakRoot.canonical`.
     ///
     /// The shell's own `$PWD` is logical, so `%~` condenses it to `~`. But a
     /// path that came from `getcwd()` — or from a snapshot captured before
@@ -168,10 +175,7 @@ enum UserEnvironment {
     /// and — because `/var/jb` is a stable link while the physical root's name
     /// can change between boots — makes a restored directory survive a reboot.
     static func logicalPath(_ path: String) -> String {
-        guard let root = jailbreakPhysicalRoot else { return path }
-        if path == root { return "/var/jb" }
-        if path.hasPrefix(root + "/") { return "/var/jb" + path.dropFirst(root.count) }
-        return path
+        JailbreakRoot.current.canonical(path)
     }
 
     private static func isDirectory(_ path: String) -> Bool {

@@ -8,13 +8,18 @@
 # still be running, so both are stopped here. The shells it owned are its pty
 # children and get SIGHUP as it exits and their masters close. Every step is
 # idempotent and ignores failure, so a fresh install runs through harmlessly.
-APP=/var/jb/Applications/diffTerm.app
+#
+# The paths below start with the bootstrap prefix, which tools/build-deb.sh
+# fills in for each package: /var/jb for rootless, nothing for roothide (whose
+# dpkg runs this with the bootstrap as /) and rootful. Only rootless ever
+# shipped sessiond; on the others those steps find nothing and move on.
+APP=@JB@/Applications/diffTerm.app
 
 # Fixed, not $APP: the old plist only ever pointed at this bundle.
 LABEL=dev.diffterm.sessiond
-PLIST=/var/jb/Library/LaunchDaemons/$LABEL.plist
-BIN=/var/jb/Applications/diffTerm.app/sessiond
-SOCK="/var/jb/var/mobile/Library/Application Support/diffTerm/sessiond.sock"
+PLIST=@JB@/Library/LaunchDaemons/$LABEL.plist
+BIN=@JB@/Applications/diffTerm.app/sessiond
+SOCK="@JB@/var/mobile/Library/Application Support/diffTerm/sessiond.sock"
 
 # By label first: dpkg may already have deleted the plist the path forms read.
 launchctl bootout "system/$LABEL" 2>/dev/null \

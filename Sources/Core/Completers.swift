@@ -107,9 +107,9 @@ final class PathCompleter {
         if let path = ProcessInfo.processInfo.environment["PATH"] {
             dirs += path.split(separator: ":").map(String.init)
         }
-        dirs += ["/var/jb/usr/local/bin", "/var/jb/usr/bin", "/var/jb/bin",
-                 "/var/jb/usr/local/sbin", "/var/jb/usr/sbin", "/var/jb/sbin",
-                 "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        dirs += ["/usr/local/bin", "/usr/bin", "/bin", "/usr/local/sbin", "/usr/sbin", "/sbin"]
+            .map(JailbreakRoot.jb)
+        dirs += ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
         var seen = Set<String>()
         return dirs.filter { seen.insert($0).inserted }
     }
@@ -216,7 +216,7 @@ struct FileCompleter {
         if keep.isEmpty {
             directory = cwd
         } else if keep.hasPrefix("/") {
-            directory = keep
+            directory = JailbreakRoot.fromShell(keep)
         } else if keep.hasPrefix("~") {
             directory = UserEnvironment.home + String(keep.dropFirst())
         } else {

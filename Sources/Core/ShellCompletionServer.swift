@@ -20,7 +20,7 @@ final class ShellCompletionServer {
 
     static let shared = ShellCompletionServer()
 
-    static let zshPath = "/var/jb/usr/bin/zsh"
+    static let zshPath = JailbreakRoot.jb("/usr/bin/zsh")
 
     /// Overridden by the tests to point at the checked-in script.
     var scriptPathOverride: String?
@@ -96,7 +96,7 @@ final class ShellCompletionServer {
         // line itself, typed, and a Tab — never an Enter, so it completes and
         // never runs.
         var bytes: [UInt8] = [0x15]
-        bytes += Array("cd -- '\(singleQuoted(cwd))' 2>/dev/null;_DTC_ID=\(id)\r".utf8)
+        bytes += Array("cd -- '\(singleQuoted(JailbreakRoot.toShell(cwd)))' 2>/dev/null;_DTC_ID=\(id)\r".utf8)
         bytes += Array(clean(line).utf8)
         bytes.append(0x09)
         pty.write(bytes)
@@ -207,7 +207,7 @@ final class ShellCompletionServer {
         var env = TerminalSession.environment()
         env["DIFFTERM_COMPLETION_SERVER"] = "1"
         env["DIFFTERM_COMPLETION_WATCHDOG"] = String(watchdogCentiseconds)
-        env["ZDOTDIR"] = dir
+        env["ZDOTDIR"] = JailbreakRoot.toShell(dir)
         // A terminal with no capabilities: the less the prompt draws, the less
         // there is to scan past for a frame.
         env["TERM"] = "dumb"
@@ -236,7 +236,7 @@ final class ShellCompletionServer {
         try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let rc = """
         [ -f "$HOME/.zshrc" ] && source "$HOME/.zshrc"
-        source '\(script.replacingOccurrences(of: "'", with: "'\\''"))'
+        source '\(JailbreakRoot.toShell(script).replacingOccurrences(of: "'", with: "'\\''"))'
         """
         do {
             try rc.write(toFile: dir + "/.zshrc", atomically: true, encoding: .utf8)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Assemble the .deb from the payload build-payload.sh staged.
+# Assemble the .debs from the payload build-payload.sh staged.
 #
 #   tools/build-deb.sh [revision]
 #
@@ -7,11 +7,25 @@
 # build-payload.sh writes, so the two cannot disagree about what was built.
 # Runs on Linux and needs nothing but dpkg-deb: the payload crossed an
 # artifact boundary to get here and is already built and signed.
+#
+# One payload, one package per kind of jailbreak. Nothing about where the
+# bootstrap lives is compiled in -- the app finds it at launch -- so the
+# packages differ only in layout and in the architecture name each
+# jailbreak's package manager looks for:
+#
+#   rootless  iphoneos-arm64   ./var/jb/Applications   Dopamine, palera1n
+#   roothide  iphoneos-arm64e  ./Applications          Serotonin + Bootstrap, Relaxin
+#   rootful   iphoneos-arm     ./Applications          palera1n rootful
+#
+# roothide's dpkg installs ./Applications under its random root and runs the
+# maintainer scripts with that root as /, so it is laid out like rootful.
+# SCHEMES="rootless" builds just the one.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PAYLOAD="$ROOT/packaging/payload"
 OUT="${OUT:-$ROOT/repo/debs}"
+SCHEMES="${SCHEMES:-rootless roothide rootful}"
 
 # The reusable workflow exports these; a local run falls back to the canonical
 # values, and an empty one just drops the URL-only control fields.
@@ -37,32 +51,59 @@ magic=$(head -c 4 "$PAYLOAD/diffTerm.app/diffTerm" | od -An -tx1 | tr -d ' \n')
 
 STAGING="$(mktemp -d)"
 trap 'rm -rf "$STAGING"' EXIT
-mkdir -p "$STAGING/DEBIAN" "$STAGING/var/jb/Applications"
-
-cp -R "$PAYLOAD/diffTerm.app" "$STAGING/var/jb/Applications/diffTerm.app"
-
-# The artifact boundary does not preserve POSIX permissions: upload-artifact
-# zips the payload and every file comes back 0644 no matter how it was
-# built. A terminal nobody can exec is not a terminal, so modes are set
-# here, explicitly, and then verified — a wrong mode fails this build
-# instead of failing on someone's home screen.
-APP_STAGING="$STAGING/var/jb/Applications/diffTerm.app"
-chmod 755 "$APP_STAGING/diffTerm"
-find "$APP_STAGING/helpers" -type f -exec chmod 755 {} +
-for bin in diffTerm helpers/pbcopy helpers/pbpaste; do
-    [ -x "$APP_STAGING/$bin" ] \
-        || { echo "not executable after staging: $bin"; exit 1; }
-done
-
-sed -e "s|@VERSION@|$PKGVER|g" \
-    -e "s|@REPO@|$GH_REPO|g" \
-    -e "s|@PAGES@|$GH_PAGES|g" \
-    "$ROOT/packaging/DEBIAN/control.in" > "$STAGING/DEBIAN/control"
-cp "$ROOT/packaging/DEBIAN/postinst" "$ROOT/packaging/DEBIAN/prerm" "$STAGING/DEBIAN/"
-chmod 755 "$STAGING/DEBIAN/postinst" "$STAGING/DEBIAN/prerm"
-
 mkdir -p "$OUT"
-# --root-owner-group: built by a CI user, installed as root.
-dpkg-deb --root-owner-group -Zgzip -b "$STAGING" \
-    "$OUT/dev.diffterm.app_${PKGVER}_iphoneos-arm64.deb"
-echo "==> built dev.diffterm.app_${PKGVER}_iphoneos-arm64.deb"
+
+build() {
+    local scheme="$1" prefix arch
+    case "$scheme" in
+        rootless) prefix=/var/jb; arch=iphoneos-arm64 ;;
+        roothide) prefix=;        arch=iphoneos-arm64e ;;
+        rootful)  prefix=;        arch=iphoneos-arm ;;
+        *) echo "unknown scheme '$scheme' (rootless, roothide or rootful)"; exit 1 ;;
+    esac
+
+    local stage="$STAGING/$scheme"
+    local app="$stage$prefix/Applications/diffTerm.app"
+    mkdir -p "$stage/DEBIAN" "$stage$prefix/Applications"
+    cp -R "$PAYLOAD/diffTerm.app" "$app"
+
+    # The artifact boundary does not preserve POSIX permissions: upload-artifact
+    # zips the payload and every file comes back 0644 no matter how it was
+    # built. A terminal nobody can exec is not a terminal, so modes are set
+    # here, explicitly, and then verified — a wrong mode fails this build
+    # instead of failing on someone's home screen. Everything is set, not
+    # just the executables: a payload built under umask 077, as on a device,
+    # would otherwise install a root-owned bundle the app cannot read.
+    find "$stage" -type d -exec chmod 755 {} +
+    find "$stage" -type f -exec chmod 644 {} +
+    chmod 755 "$app/diffTerm"
+    find "$app/helpers" -type f -exec chmod 755 {} +
+    for bin in diffTerm helpers/pbcopy helpers/pbpaste; do
+        [ -x "$app/$bin" ] \
+            || { echo "not executable after staging: $bin ($scheme)"; exit 1; }
+    done
+
+    sed -e "s|@VERSION@|$PKGVER|g" \
+        -e "s|@ARCH@|$arch|g" \
+        -e "s|@REPO@|$GH_REPO|g" \
+        -e "s|@PAGES@|$GH_PAGES|g" \
+        "$ROOT/packaging/DEBIAN/control.in" > "$stage/DEBIAN/control"
+    for script in postinst prerm; do
+        sed -e "s|@JB@|$prefix|g" "$ROOT/packaging/DEBIAN/$script" > "$stage/DEBIAN/$script"
+        chmod 755 "$stage/DEBIAN/$script"
+    done
+    # A placeholder left in a script would name a path that does not exist,
+    # and uicache would register nothing without saying so.
+    if grep -q '@[A-Z]*@' "$stage/DEBIAN/control" "$stage/DEBIAN/postinst" "$stage/DEBIAN/prerm"; then
+        echo "unfilled placeholder in the $scheme package's DEBIAN files"; exit 1
+    fi
+
+    local deb="dev.diffterm.app_${PKGVER}_${arch}.deb"
+    # --root-owner-group: built by a CI user, installed as root.
+    dpkg-deb --root-owner-group -Zgzip -b "$stage" "$OUT/$deb"
+    echo "==> built $deb ($scheme)"
+}
+
+for scheme in $SCHEMES; do
+    build "$scheme"
+done

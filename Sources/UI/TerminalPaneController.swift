@@ -445,6 +445,12 @@ final class TerminalPaneController: UIViewController {
 
     @objc private func handleTap(_ g: UITapGestureRecognizer) {
         if !session.isRunning, session.exitCode != nil {
+            // The failure report ends in a link to file it; a tap on that
+            // opens it rather than restarting into the same failure.
+            if let link = terminalView.link(at: gridPosition(for: g)) {
+                confirmOpen(link)
+                return
+            }
             restartSession()
             return
         }
@@ -998,7 +1004,9 @@ final class TerminalPaneController: UIViewController {
         // Rather than closing out from under the user (which loses whatever
         // the program printed), say what happened and offer a restart.
         let status = code == 0 ? "[process completed" : "[process exited with status \(code)"
-        let message = "\r\n\u{1B}[2m\(status) — tap to start a new session]\u{1B}[0m\r\n"
+        var message = ""
+        if session.failedOnArrival { message += session.failedOnArrivalReport() }
+        message += "\r\n\u{1B}[2m\(status) — tap to start a new session]\u{1B}[0m\r\n"
         session.emulator.feed(message)
         syncAfterOutput()
         terminalView?.setNeedsDisplay()

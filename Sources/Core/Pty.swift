@@ -7,7 +7,10 @@ enum PtyError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .spawnFailed(let code):
-            return "Couldn't start the shell: \(String(cString: strerror(code))) (\(code))"
+            // dt_spawn_pty fails before exec only when it cannot get a
+            // pseudo-terminal or fork; an exec failure is reported by the
+            // child itself, on the terminal.
+            return "Couldn't open a terminal for the shell: \(String(cString: strerror(code))) (errno \(code))."
         case .notRunning:
             return "The shell is not running."
         }

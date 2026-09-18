@@ -1,7 +1,7 @@
 Package: dev.diffterm.app
 Name: diffTerm
 Version: @VERSION@
-Architecture: iphoneos-arm64
+Architecture: @ARCH@
 Maintainer: andi <tafilajandi@gmail.com>
 Author: andi
 Section: Terminal_Support
