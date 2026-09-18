@@ -128,10 +128,16 @@ extension TerminalPaneController: UIGestureRecognizerDelegate {
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
         // The pinch-to-resize gesture must not fight the scroll view.
         if g is UIPinchGestureRecognizer || other is UIPinchGestureRecognizer { return true }
+        // The focus tap only raises the keyboard; the double and triple taps
+        // behind it must still see the same touches.
+        if let focusTap = focusTapRecognizer, g === focusTap || other === focusTap { return true }
         return false
     }
 
     func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
+        // A three-finger pinch is iOS's copy (in) and paste (out). Taking it
+        // as a text-size pinch kept it from ever reaching the system.
+        if g is UIPinchGestureRecognizer, g.numberOfTouches > 2 { return false }
         if g is UILongPressGestureRecognizer, terminalView.selection != nil {
             // Let a long press inside an existing selection fall through to
             // the edit menu rather than starting a new selection.
@@ -186,8 +192,9 @@ extension TerminalPaneController: UIEditMenuInteractionDelegate {
             })
         }
 
+        let menuPoint = configuration.sourcePoint
         actions.append(UIAction(title: "Select All", image: UIImage(systemName: "selection.pin.in.out")) { [weak self] _ in
-            self?.selectAllText()
+            self?.selectAllOfferingCopy(at: menuPoint)
         })
 
         actions.append(UIAction(title: "Find", image: UIImage(systemName: "magnifyingglass")) { [weak self] _ in

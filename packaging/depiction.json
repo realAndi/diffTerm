@@ -109,6 +109,18 @@
       "views": [
         {
           "class": "DepictionSubheaderView",
+          "title": "2.2.3",
+          "useBoldText": true,
+          "useBottomMargin": true
+        },
+        {
+          "class": "DepictionMarkdownView",
+          "useSpacing": true,
+          "useRawFormat": false,
+          "markdown": "- Keyboard opens faster.\n- Three-finger copy and paste.\n- Copy after Select All.\n- bash no longer crashes on locales iOS lacks (en_US.UTF-8, C.UTF-8)."
+        },
+        {
+          "class": "DepictionSubheaderView",
           "title": "2.2.2",
           "useBoldText": true,
           "useBottomMargin": true

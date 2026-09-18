@@ -3180,7 +3180,80 @@ struct Harness {
                    "$LC_ALL names a complete locale", "got \(all)")
         }
 
+        localeDirectoryTests(env: env)
         print("")
+    }
+
+    /// The names other people's setups use — `en_US.UTF-8` from NewTerm and
+    /// most dotfiles, `C.UTF-8` from Linux habits — made to exist for the
+    /// character type, so bash cannot be crashed by one being set later.
+    static func localeDirectoryTests(env: [String: String]) {
+        let fm = FileManager.default
+        let tree = NSTemporaryDirectory() + "dt-locale-\(getpid())"
+        try? fm.removeItem(atPath: tree)
+        defer { try? fm.removeItem(atPath: tree) }
+
+        let built = UserEnvironment.buildLocaleDirectory(at: tree + "/locale", system: "/usr/share/locale")
+        expectEqual(built, tree + "/locale", "the locale directory builds from the system's")
+        if let built {
+            let ctype = (try? fm.destinationOfSymbolicLink(atPath: built + "/en_US.UTF-8/LC_CTYPE"))
+            expectEqual(ctype, "/usr/share/locale/UTF-8/LC_CTYPE",
+                        "en_US.UTF-8 is the system's UTF-8 character type")
+            expect(fm.isReadableFile(atPath: built + "/C.UTF-8/LC_CTYPE"), "and so is C.UTF-8")
+            expect(fm.isReadableFile(atPath: built + "/UTF-8/LC_CTYPE"),
+                   "UTF-8 itself still resolves, since the variable hides the system directory")
+            expectEqual(UserEnvironment.buildLocaleDirectory(at: built, system: "/usr/share/locale"), built,
+                        "building again over the top is harmless")
+        }
+        try? fm.createDirectory(atPath: tree + "/empty-system", withIntermediateDirectories: true)
+        expect(UserEnvironment.buildLocaleDirectory(at: tree + "/nothing", system: tree + "/empty-system") == nil,
+               "a system with no UTF-8 to lend gets no directory rather than a broken one")
+
+        guard let locales = UserEnvironment.localeDirectory else {
+            print("  · no locale directory on this device; PATH_LOCALE is not exported")
+            return
+        }
+        expectEqual(env["PATH_LOCALE"], locales, "sessions are handed the locale directory")
+
+        // The real thing: bash under the environments that used to kill it.
+        let bash = JailbreakRoot.jb("/usr/bin/bash")
+        guard fm.isExecutableFile(atPath: bash) else {
+            print("  · no bash here; the live checks need one"); return
+        }
+        func run(_ changes: [String: String?], login: Bool) -> Int32? {
+            var e = env
+            for (key, value) in changes { e[key] = value }
+            let pty = Pty()
+            var code: Int32?
+            var output = 0
+            let lock = NSLock()
+            pty.onRead = { chunk in lock.lock(); output += chunk.count; lock.unlock() }
+            pty.onExit = { code = $0 }
+            do {
+                try pty.start(executable: bash, arguments: [login ? "-bash" : "bash"] + (login ? [] : ["-i"]),
+                              environment: e, workingDirectory: "/", cols: 80, rows: 24)
+            } catch { return nil }
+            // Wait for the prompt, then leave; a crash ends it before either.
+            let deadline = Date().addingTimeInterval(15)
+            var sent = false
+            while code == nil, Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+                lock.lock(); let seen = output; lock.unlock()
+                if !sent, seen > 0 { pty.write("exit\r"); sent = true }
+            }
+            return code
+        }
+        let newTerm: [String: String?] = ["LC_CTYPE": nil, "LANG": "en_US.UTF-8"]
+        expectEqual(run(newTerm, login: true), 0,
+                    "a login bash with NewTerm's LANG=en_US.UTF-8 starts and exits cleanly")
+        expectEqual(run(newTerm, login: false), 0, "and so does bash -i")
+        expectEqual(run(["LC_ALL": "C.UTF-8"], login: true), 0,
+                    "LC_ALL=C.UTF-8, which outranks everything, no longer crashes it")
+        var bare = newTerm
+        bare["PATH_LOCALE"] = .some(nil)
+        let control = run(bare, login: true)
+        print("  · the same NewTerm environment without the directory: exit \(control.map(String.init) ?? "none")"
+              + (control == 139 ? " (SIGSEGV, the original crash)" : ""))
     }
 
     // MARK: - Jailbreak root

@@ -93,6 +93,80 @@ enum UserEnvironment {
         return dt_locale_is_complete(name) != 0
     }
 
+    /// A locale directory for shells, handed over as `$PATH_LOCALE`, or nil if
+    /// it could not be built.
+    ///
+    /// `ctypeLocale` keeps diffTerm's own environment clear of names iOS lacks,
+    /// but the names come back from everywhere else: dotfiles, scripts,
+    /// `LANG=en_US.UTF-8 bash`, `LC_ALL=C.UTF-8` in a Linux-minded setup. Any
+    /// of those reaching readline as its character type crashes bash the same
+    /// way. libc reads locales from `$PATH_LOCALE` instead of
+    /// /usr/share/locale when it is set, so this directory makes the common
+    /// UTF-8 names exist: each is iOS's one real character type under another
+    /// name. The system's own entries are mirrored alongside, because the
+    /// variable replaces the system directory rather than adding to it.
+    ///
+    /// Only LC_CTYPE is provided. It is the category readline asks for and the
+    /// only one iOS has to lend; the bootstrap's gettext-localizations package
+    /// ships the rest as empty placeholders, which is why they cannot be
+    /// borrowed instead.
+    static let localeDirectory: String? = buildLocaleDirectory(
+        at: supportDirectory + "/locale", system: "/usr/share/locale")
+
+    /// Locale names people actually set, each given the UTF-8 character type:
+    /// macOS's UTF-8 set, plus the C and Linux spellings.
+    static let utf8LocaleAliases: [String] = {
+        let regions = [
+            "af_ZA", "am_ET", "be_BY", "bg_BG", "ca_ES", "cs_CZ", "da_DK", "de_AT",
+            "de_CH", "de_DE", "el_GR", "en_AU", "en_CA", "en_GB", "en_IE", "en_IN",
+            "en_NZ", "en_US", "es_ES", "es_MX", "et_EE", "eu_ES", "fi_FI", "fr_BE",
+            "fr_CA", "fr_CH", "fr_FR", "he_IL", "hr_HR", "hu_HU", "hy_AM", "is_IS",
+            "it_CH", "it_IT", "ja_JP", "kk_KZ", "ko_KR", "lt_LT", "nb_NO", "nl_BE",
+            "nl_NL", "no_NO", "pl_PL", "pt_BR", "pt_PT", "ro_RO", "ru_RU", "sk_SK",
+            "sl_SI", "sq_AL", "sr_RS", "sv_SE", "tr_TR", "uk_UA", "zh_CN", "zh_HK",
+            "zh_TW", "C",
+        ]
+        return regions.flatMap { ["\($0).UTF-8", "\($0).utf8"] }
+    }()
+
+    /// Builds or repairs the directory; nil if the system has no UTF-8
+    /// character type to lend, or the directory cannot be made whole. Safe to
+    /// run on every launch: it only adds what is missing or wrong, so a shell
+    /// reading it at the time never sees it half-built.
+    static func buildLocaleDirectory(at directory: String, system: String) -> String? {
+        let fm = FileManager.default
+        let ctype = system + "/UTF-8/LC_CTYPE"
+        guard fm.isReadableFile(atPath: ctype) else { return nil }
+
+        func link(_ path: String, to target: String) -> Bool {
+            if (try? fm.destinationOfSymbolicLink(atPath: path)) == target { return true }
+            try? fm.removeItem(atPath: path)
+            return (try? fm.createSymbolicLink(atPath: path, withDestinationPath: target)) != nil
+        }
+
+        do {
+            try fm.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        } catch { return nil }
+
+        let systemNames = (try? fm.contentsOfDirectory(atPath: system)) ?? []
+        for name in systemNames {
+            guard link(directory + "/" + name, to: system + "/" + name) else { return nil }
+        }
+        for alias in utf8LocaleAliases where !systemNames.contains(alias) {
+            let dir = directory + "/" + alias
+            // A mirror link from an earlier system that had this name.
+            if (try? fm.destinationOfSymbolicLink(atPath: dir)) != nil { try? fm.removeItem(atPath: dir) }
+            guard (try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)) != nil,
+                  link(dir + "/LC_CTYPE", to: ctype) else { return nil }
+        }
+
+        // The whole point is that UTF-8 still resolves once the variable
+        // hides the system directory; if it does not, hand over nothing.
+        guard fm.isReadableFile(atPath: directory + "/UTF-8/LC_CTYPE"),
+              fm.isReadableFile(atPath: directory + "/en_US.UTF-8/LC_CTYPE") else { return nil }
+        return directory
+    }
+
     /// The home directory the *system's* passwd database gives, which is
     /// deliberately not the one above.
     ///

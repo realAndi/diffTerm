@@ -48,6 +48,15 @@ final class TerminalPaneController: UIViewController {
     /// selector with nowhere to put an argument, so it has to be stashed.
     private var legacyMenuLink: String?
 
+    /// Where the edit menu was last raised, so Select All can raise it again
+    /// in the same place.
+    private var lastEditMenuPoint: CGPoint?
+
+    /// Opens the keyboard on the first tap instead of after the double-tap
+    /// window closes. See `handleFocusTap`.
+    private var focusTap: UITapGestureRecognizer?
+    var focusTapRecognizer: UIGestureRecognizer? { focusTap }
+
     private var pinchStartFontSize: CGFloat = 13
 
     /// Last time the pinch gesture wrote the font size preference. Writing it
@@ -130,6 +139,9 @@ final class TerminalPaneController: UIViewController {
             return self.session.emulator.modes.mouseTracking == .none
         }
         scrollView.keyboardDismissMode = .none
+        // Three-finger swipes are iOS's undo and redo, and a three-finger
+        // pinch is copy and paste. Scrolling uses one finger or two.
+        scrollView.panGestureRecognizer.maximumNumberOfTouches = 2
         scrollView.addSubview(terminalView)
         view.addSubview(scrollView)
 
@@ -408,6 +420,15 @@ final class TerminalPaneController: UIViewController {
         tap.delegate = self
         terminalView.addGestureRecognizer(tap)
 
+        // `tap` has to wait for the double- and triple-tap recognizers to
+        // give up, about a third of a second, and opening the keyboard waited
+        // with it. This one fires at once and only ever focuses; everything
+        // else a tap does still goes through `tap`.
+        let focus = UITapGestureRecognizer(target: self, action: #selector(handleFocusTap(_:)))
+        focus.delegate = self
+        terminalView.addGestureRecognizer(focus)
+        focusTap = focus
+
         let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
         doubleTap.numberOfTapsRequired = 2
         doubleTap.delegate = self
@@ -441,6 +462,23 @@ final class TerminalPaneController: UIViewController {
 
     private func gridPosition(for recognizer: UIGestureRecognizer) -> GridPosition {
         terminalView.gridPosition(at: recognizer.location(in: terminalView))
+    }
+
+    /// Opens the keyboard straight away when a tap would do nothing else.
+    /// The conditions are `handleTap`'s: a tap that restarts a finished
+    /// session, opens a link, folds a block, clicks in a mouse-tracking
+    /// program or clears a selection is left to it, since focusing first
+    /// would raise the keyboard under an alert or a menu.
+    @objc private func handleFocusTap(_ g: UITapGestureRecognizer) {
+        let point = g.location(in: terminalView)
+        guard !hostView.isFirstResponder,
+              session.isRunning,
+              session.emulator.modes.mouseTracking == .none,
+              terminalView.selection == nil,
+              terminalView.blockForGutterTap(at: point, emulator: session.emulator) == nil,
+              terminalView.link(at: terminalView.gridPosition(at: point)) == nil
+        else { return }
+        becomeFirstResponderIfPossible()
     }
 
     @objc private func handleTap(_ g: UITapGestureRecognizer) {
@@ -693,6 +731,7 @@ final class TerminalPaneController: UIViewController {
     }
 
     private func presentEditMenu(at point: CGPoint) {
+        lastEditMenuPoint = point
         if #available(iOS 16.0, *) {
             let configuration = UIEditMenuConfiguration(identifier: nil, sourcePoint: point)
             (editMenuInteraction as? UIEditMenuInteraction)?.presentEditMenu(with: configuration)
@@ -744,7 +783,22 @@ final class TerminalPaneController: UIViewController {
 
     @objc override func paste(_ sender: Any?) { pasteFromClipboard() }
 
-    @objc override func selectAll(_ sender: Any?) { selectAllText() }
+    @objc override func selectAll(_ sender: Any?) {
+        selectAllOfferingCopy(at: lastEditMenuPoint
+                              ?? CGPoint(x: terminalView.bounds.midX, y: terminalView.bounds.midY))
+    }
+
+    /// Select All from a menu used to leave the menu gone and nothing on
+    /// screen to copy with, so it comes back straight away with Copy in it,
+    /// the way it does in any text view. Deferred a turn: the menu that ran
+    /// the action is still closing.
+    func selectAllOfferingCopy(at point: CGPoint) {
+        selectAllText()
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.terminalView.selection != nil else { return }
+            self.presentEditMenu(at: point)
+        }
+    }
 
     @objc private func menuFind() { showSearch() }
 

@@ -19,7 +19,7 @@ SHELL        := $(HOST_JB)/bin/sh
 APP_NAME     ?= diffTerm
 BUNDLE_ID    ?= dev.diffterm.app
 DISPLAY_NAME ?= $(APP_NAME)
-VERSION      ?= 2.2.2
+VERSION      ?= 2.2.3
 
 # Only the primary install owns the pbcopy/pbpaste links.
 PRIMARY_ID   := dev.diffterm.app

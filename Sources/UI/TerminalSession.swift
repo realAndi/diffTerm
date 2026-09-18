@@ -642,6 +642,14 @@ final class TerminalSession: NSObject {
                 }
             }
         }
+        // And whatever a dotfile or a command sets later, the common UTF-8
+        // names resolve rather than crash readline: see `localeDirectory`.
+        // In the device's spelling even on roothide, since it is the system's
+        // libc that reads it — the same libc that finds `UTF-8` in iOS's own
+        // /usr/share/locale for a roothide shell today.
+        if env["LC_CTYPE"] != nil, let locales = UserEnvironment.localeDirectory {
+            env["PATH_LOCALE"] = locales
+        }
         // HOME must match the passwd database the rest of the bootstrap uses,
         // or the shell reads no rc files, ssh finds no keys and git finds no
         // config — all while appearing to work.
