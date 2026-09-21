@@ -79,6 +79,7 @@ struct Harness {
         tabBarContrastTests()
         tabTitleTests()
         displayTests()
+        carPlayTests()
         systemImageTests()
         themeTests()
         inlineImageTests()
@@ -1669,6 +1670,415 @@ struct Harness {
             expect(false, "root has a tab to split")
         }
 
+        print("")
+    }
+
+    /// The car's framing of the terminal, the controller that draws it, and
+    /// who decides the shell's size while a car is attached.
+    ///
+    /// There is no car here, so the controller is driven directly: frames from
+    /// `tick`, layout at the size of a car's screen, and the checks are on
+    /// what it would draw. The ones that matter most: the phone keeps its own
+    /// size while it is in use, and the car only takes over once it is not.
+    static func carPlayTests() {
+        print("carplay")
+
+        // The sizes below are worked out from the font settings, which are
+        // whatever the last run left in this binary's defaults. Pin them.
+        let prefs = Preferences.shared
+        let savedFontSize = prefs.fontSize
+        prefs.fontSize = 13
+        defer { prefs.fontSize = savedFontSize }
+
+        // Which rows are shown while following. Absolute rows throughout.
+        expectEqual(CarPlayFraming.followTop(totalRows: 40, screenRows: 40, contentBottom: 0, visibleRows: 13),
+                    0, "a fresh shell shows its prompt at the top")
+        expectEqual(CarPlayFraming.followTop(totalRows: 140, screenRows: 40, contentBottom: 139, visibleRows: 13),
+                    127, "a full screen shows its last rows")
+        expectEqual(CarPlayFraming.followTop(totalRows: 140, screenRows: 40, contentBottom: 100, visibleRows: 13),
+                    100, "after clear the prompt is at the top, not under old history")
+        expectEqual(CarPlayFraming.followTop(totalRows: 140, screenRows: 40, contentBottom: 120, visibleRows: 13),
+                    108, "output ending mid-screen ends at the bottom of the car")
+        expectEqual(CarPlayFraming.followTop(totalRows: 120, screenRows: 20, contentBottom: 105, visibleRows: 30),
+                    90, "a car taller than the screen fills the rest with history")
+        expectEqual(CarPlayFraming.followTop(totalRows: 20, screenRows: 20, contentBottom: 19, visibleRows: 30),
+                    0, "and with no history yet starts at the top")
+
+        // Sideways, since the phone's lines are drawn at the phone's size and
+        // a car is narrower than a phone.
+        expectEqual(CarPlayFraming.followLeft(cols: 45, visibleCols: 45, cursorCol: 30, current: 0),
+                    0, "a grid that fits is never panned")
+        expectEqual(CarPlayFraming.followLeft(cols: 100, visibleCols: 54, cursorCol: 80, current: 0),
+                    28, "a cursor off the right edge pulls the view after it")
+        expectEqual(CarPlayFraming.followLeft(cols: 100, visibleCols: 54, cursorCol: 30, current: 28),
+                    28, "a cursor comfortably inside leaves the view alone")
+        expectEqual(CarPlayFraming.followLeft(cols: 100, visibleCols: 54, cursorCol: 5, current: 28),
+                    4, "a cursor back at the start brings the view back")
+        expectEqual(CarPlayFraming.followLeft(cols: 100, visibleCols: 54, cursorCol: 99, current: 0),
+                    46, "and it never runs off the end of the grid")
+
+        // The car's screen, divided up: its own bars can cover a lot of the
+        // panel, and the keys have to sit somewhere.
+        let panel = CGRect(x: 0, y: 0, width: 400, height: 240)
+        let keys = CarPlayFraming.buttonColumnWidth
+        let dock = CarPlayFraming.dockColumnWidth(for: panel.width)
+        expect(dock >= 56, "a car's bar is assumed to be there even when unreported", "\(dock)pt")
+
+        // A car that reports nothing: the reserves alone have to clear its
+        // bar on the left and its buttons on the right.
+        let blind = CarPlayFraming.contentArea(bounds: panel, safeArea: .zero, headerHeight: 15,
+                                               leftReserve: dock, rightReserve: keys)
+        expect(blind.terminal.minX >= dock, "the terminal starts clear of the car's bar",
+               "\(blind.terminal.minX) with \(dock)pt reserved")
+        expect(blind.terminal.maxX <= panel.maxX - keys, "and stops clear of the keys",
+               "\(blind.terminal.maxX) into \(panel.maxX - keys)")
+        expect(blind.header.minX >= dock, "and so does the title line", "\(blind.header)")
+
+        // A car that does report them must not have them counted twice.
+        let bars = UIEdgeInsets(top: 0, left: 120, bottom: 0, right: 100)
+        let split = CarPlayFraming.contentArea(bounds: panel, safeArea: bars, headerHeight: 15,
+                                               leftReserve: dock, rightReserve: keys)
+        let barFree = panel.inset(by: bars)
+        expect(barFree.contains(split.terminal), "the terminal keeps out of the car's own bars",
+               "\(split.terminal) not inside \(barFree)")
+        expect(barFree.contains(split.header), "and so does the title line",
+               "\(split.header) not inside \(barFree)")
+        expect(split.terminal.minY >= split.header.maxY, "which sits above it",
+               "\(split.header) then \(split.terminal)")
+
+        // How much of the phone's grid that leaves, at the phone's own text
+        // size, on the screens CarPlay Simulator offers. Apple gives these in
+        // pixels; a 800x480 car at 2x is 400x240 points to draw in.
+        let cars: [(String, CGSize)] = [
+            ("minimum",    CGSize(width: 374, height: 228)),
+            ("standard",   CGSize(width: 400, height: 240)),
+            ("widescreen", CGSize(width: 640, height: 240)),
+            ("portrait",   CGSize(width: 300, height: 400)),
+        ]
+        for (car, size) in cars {
+            let area = CarPlayFraming.contentArea(bounds: CGRect(origin: .zero, size: size),
+                                                  safeArea: .zero, headerHeight: 15,
+                                                  leftReserve: CarPlayFraming.dockColumnWidth(for: size.width),
+                                                  rightReserve: keys).terminal
+            let chosen = CarPlayFraming.grid(in: area.size, preferredPointSize: prefs.fontSize) {
+                TerminalFont(familyName: prefs.fontName, pointSize: $0,
+                             lineHeightScale: prefs.lineHeightScale, scale: 2).cellSize
+            }
+            // A panel as narrow as a portrait car cannot hold forty columns
+            // beside its own bar and a column of keys; it gets what it gets.
+            let wanted = size.width >= 350 ? 28 : 20
+            expect(chosen.cols >= wanted && chosen.rows >= 8,
+                   "\(car): holds a terminal worth reading",
+                   "\(chosen.cols)x\(chosen.rows) at \(chosen.points)pt")
+            expect(chosen.points >= CarPlayFraming.minimumPointSize,
+                   "\(car): and never goes below the floor to get there", "\(chosen.points)pt")
+            print("  \(car) \(Int(size.width))x\(Int(size.height))pt: "
+                  + "\(chosen.cols)x\(chosen.rows) at \(chosen.points)pt "
+                  + "(phone's own is \(prefs.fontSize)pt)")
+        }
+        // A screen with room to spare keeps the size the user chose.
+        let roomy = CarPlayFraming.grid(in: CGSize(width: 900, height: 300),
+                                        preferredPointSize: prefs.fontSize) {
+            TerminalFont(familyName: prefs.fontName, pointSize: $0,
+                         lineHeightScale: prefs.lineHeightScale, scale: 2).cellSize
+        }
+        expectEqual(roomy.points, prefs.fontSize, "a wide car keeps the phone's text size")
+
+        // The phone's lines shown whole: as large as fits, never above the
+        // phone's size, never below the floor.
+        let width = { (points: CGFloat) in points * 0.6 }
+        expectEqual(CarPlayFraming.pointSize(fitting: 40, in: 400, preferred: 13, minimum: 7, cellWidth: width),
+                    13, "a line that fits at the phone's size is drawn at it")
+        let fitted = CarPlayFraming.pointSize(fitting: 49, in: 272, preferred: 13, minimum: 7, cellWidth: width)
+        expect(49 * width(fitted) <= 272 && 49 * width(fitted + 0.5) > 272,
+               "a longer one at the largest half point that fits", "\(fitted)pt")
+        expectEqual(CarPlayFraming.pointSize(fitting: 106, in: 272, preferred: 13, minimum: 7, cellWidth: width),
+                    7, "and one that fits nowhere at the floor")
+
+        // The car's command line: what it offers, and the exact bytes each
+        // row writes to the shell.
+        let typedRows = CarPlayCommandRows.rows(for: "ma", history: ["make test", "make"])
+        expectEqual(typedRows.first?.title, "ma", "what was typed is the first thing offered")
+        expectEqual(typedRows.first?.sends, "ma\r", "and it runs as a line, like a Return on the phone")
+        expectEqual(typedRows.count, 3, "with the matching history under it")
+        expectEqual(typedRows.last?.title, "make", "newest-first order is the store's, kept as given")
+        expect(typedRows.dropFirst().allSatisfy { $0.detail == "History" },
+               "history rows say where they came from")
+
+        let exact = CarPlayCommandRows.rows(for: "make", history: ["make"])
+        expectEqual(exact.count, 1, "a history entry identical to the typed line is not offered twice")
+
+        let empty = CarPlayCommandRows.rows(for: "", history: ["make test", "git status"])
+        expectEqual(empty.count, 3, "an empty field offers recent commands")
+        expectEqual(empty.first?.title, "make test", "history first")
+        expectEqual(empty.last?.sends, "\u{03}", "and stopping a command last, where no thumb lands by accident")
+        expect(!empty.contains { $0.detail == "Run" }, "with nothing typed there is nothing to run")
+
+        let dirty = CarPlayCommandRows.rows(for: "echo hi\u{03}\u{1b}", history: [])
+        expectEqual(dirty.first?.sends, "echo hi\r",
+                    "control characters never reach the shell from the car's field")
+
+        // The car's list of tabs: what each row says at a glance.
+        let home = "/var/mobile"
+        let idle = CarPlayTabRows.row(for: .init(title: "zsh", directory: "/var/mobile/src/diffTerm"),
+                                      home: home)
+        expectEqual(idle.detail, "~/src/diffTerm", "an idle tab says where it is, as the prompt would")
+        expectEqual(idle.state, .idle, "and is idle")
+        expectEqual(CarPlayTabRows.abbreviate(home, home: home), "~", "home itself is ~")
+        expectEqual(CarPlayTabRows.abbreviate("/var/mobilestuff", home: home), "/var/mobilestuff",
+                    "a sibling that only shares the prefix is not home")
+        let running = CarPlayTabRows.row(for: .init(title: "make", command: "make test",
+                                                    commandRunning: true, directory: home), home: home)
+        expectEqual(running.detail, "Running: make test", "a running command says what it is")
+        expectEqual(running.state, .running, "and is running")
+        let failed = CarPlayTabRows.row(for: .init(title: "zsh", command: "make test",
+                                                   commandExitCode: 2, directory: home), home: home)
+        expectEqual(failed.detail, "Failed: make test (exit 2)", "a failed command says so, with its status")
+        expectEqual(failed.state, .failed, "and is marked failed")
+        let passed = CarPlayTabRows.row(for: .init(title: "zsh", command: "make",
+                                                   commandExitCode: 0, directory: home), home: home)
+        expectEqual(passed.state, .idle, "a command that succeeded is nothing to report")
+        let exited = CarPlayTabRows.row(for: .init(title: "zsh", shellExitCode: 1, directory: home),
+                                        home: home)
+        expectEqual(exited.detail, "Shell exited with status 1", "a shell that has gone says so")
+        let splitTab = CarPlayTabRows.row(for: .init(title: "zsh", paneCount: 2, directory: home), home: home)
+        expectEqual(splitTab.title, "zsh (2 panes)", "a split tab says how many panes it has")
+        expectEqual(CommandNotifier.summary(command: "make test", exitCode: 2, duration: 252),
+                    "make test · exit 2 · 4m 12s",
+                    "the car's alert and the phone's notification describe a command the same way")
+
+        // The car's grid only reaches the shells once it has held still: a
+        // car reports its screen in pieces, and every resize is a reflow and
+        // a SIGWINCH to every shell.
+        let wasLeading = prefs.carPlayLeads
+        prefs.carPlayLeads = true
+        let link = CarPlayLink.shared
+        link.disconnect()
+        link.setPhoneVisible(false)
+        var announcements = 0
+        let token = NotificationCenter.default.addObserver(
+            forName: CarPlayLink.didChangeNotification, object: nil, queue: nil) { _ in announcements += 1 }
+        CarPlayLink.settleDelay = 0.05
+        link.connect(cols: 40, rows: 12)
+        link.connect(cols: 40, rows: 13)
+        link.connect(cols: 41, rows: 13)
+        expect(link.carGrid == nil, "a car's grid is not used while it is still changing")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+        expect(link.carGrid.map { $0 == (41, 13) } ?? false, "and is once it has settled",
+               "\(String(describing: link.carGrid))")
+        expectEqual(announcements, 1, "with one resize for the lot")
+        link.connect(cols: 41, rows: 13)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        expectEqual(announcements, 1, "the same grid again resizes nothing")
+        link.setPhoneVisible(true)
+        expectEqual(announcements, 2, "picking the phone up hands the size back")
+        expect(link.grid == nil, "to the phone")
+        link.disconnect()
+        expectEqual(announcements, 2, "and a car leaving while the phone is in use changes nothing")
+        NotificationCenter.default.removeObserver(token)
+        CarPlayLink.settleDelay = 0
+
+        // The controller, over the shared tabs, at a car's size. The phone is
+        // in use to begin with, so it has the shell's size and the car shows
+        // what it can of it.
+        let root = RootViewController.shared
+        root.loadViewIfNeeded()
+        root.view.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
+        root.view.layoutIfNeeded()
+        guard let pane = root.activeTab?.activePane else {
+            expect(false, "the shared root has a pane for the car to show")
+            prefs.carPlayLeads = wasLeading
+            print("")
+            return
+        }
+        let emulator = pane.session.emulator
+        let phoneGrid = (emulator.cols, emulator.rows)
+        emulator.feed(Array((1...200).map { "line \($0)\r\n" }.joined().utf8))
+
+        let car = CarPlayTerminalController()
+        var stateChanges = 0
+        car.onStateChange = { stateChanges += 1 }
+        car.loadViewIfNeeded()
+        car.view.frame = CGRect(x: 0, y: 0, width: 400, height: 240)
+        car.start(on: UIScreen.main)
+        car.view.layoutIfNeeded()
+        defer {
+            car.stop()
+            link.disconnect()
+            prefs.carPlayLeads = wasLeading
+        }
+
+        guard let grid = car.terminalView, let window = grid.superview else {
+            expect(false, "the car builds a terminal view")
+            print("")
+            return
+        }
+        expect(grid.emulator === emulator, "the car draws the phone's active pane")
+        expect(grid.terminalFont.pointSize <= prefs.fontSize
+               && grid.terminalFont.pointSize >= CarPlayFraming.fitMinimumPointSize,
+               "the car draws at the phone's size, or as near it as shows the whole line",
+               "\(grid.terminalFont.pointSize)pt for the phone's \(prefs.fontSize)pt")
+        expect(grid.frame.width <= window.frame.width + 0.5,
+               "while the phone sets the width, the car shows every column of it",
+               "\(emulator.cols) columns, grid \(grid.frame.width)pt in window \(window.frame.width)pt")
+        expect(!(car.headerText ?? "").contains("cols"),
+               "so the title line has no slice of the line to point out", car.headerText ?? "")
+        expect(Int(window.frame.width / grid.cellSize.width) >= 28,
+               "and holds a terminal worth reading",
+               "\(Int(window.frame.width / grid.cellSize.width)) columns")
+        print("  phone leading: \(emulator.cols) columns whole at \(grid.terminalFont.pointSize)pt, "
+              + "\(Int(window.frame.height / grid.cellSize.height)) rows")
+        expect(window.frame.maxX <= 400 - keys, "the text stops short of the keys",
+               "\(window.frame) with \(keys)pt reserved")
+        expect(window.frame.maxY <= 240, "and stays on the car's screen", "\(window.frame)")
+        let lastRow = CGFloat(emulator.buffer.totalRows) * grid.cellSize.height
+        expect(abs(grid.scrollOffset + window.frame.height - lastRow) < grid.cellSize.height + 0.5,
+               "following ends at the newest output")
+        expectEqual(stateChanges, 0, "the buttons are not told from inside a frame")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        expect(stateChanges > 0, "but are, once it is over")
+
+        // A car screen that turns out to be another size is picked up by the
+        // next layout pass, with nothing about the terminal having changed.
+        car.view.frame = CGRect(x: 0, y: 0, width: 640, height: 240)
+        car.view.layoutIfNeeded()
+        expect(window.frame.width > 400 - keys - 12,
+               "a car screen that changes size is picked up when it is laid out",
+               "\(window.frame)")
+        car.view.frame = CGRect(x: 0, y: 0, width: 400, height: 240)
+        car.view.layoutIfNeeded()
+
+        // The car's buttons moving tells the view nothing, so the frames check.
+        let narrowed = window.frame.width
+        var buttons = CGRect(x: 0, y: 0, width: 300, height: 240)
+        car.buttonArea = { buttons }
+        for _ in 0..<15 { car.tick() }
+        expect(window.frame.width < narrowed,
+               "buttons that grow into the text are cleared within half a second of frames",
+               "\(narrowed)pt became \(window.frame.width)pt")
+        buttons = .zero
+        for _ in 0..<15 { car.tick() }
+        expect(abs(window.frame.width - narrowed) < 0.5, "and given back when they shrink",
+               "\(window.frame.width)pt, was \(narrowed)pt")
+        car.buttonArea = nil
+
+        // Scrolling back and coming home.
+        car.beginDrag()
+        car.drag(by: CGPoint(x: 0, y: grid.cellSize.height * 20))
+        car.endDrag()
+        expect(car.isScrolledBack, "dragging down scrolls back through history")
+        let intoRow = grid.scrollOffset.truncatingRemainder(dividingBy: grid.cellSize.height)
+        expect(min(intoRow, grid.cellSize.height - intoRow) < 0.01,
+               "a drag lands on a whole row", "\(intoRow)pt into a \(grid.cellSize.height)pt row")
+        car.scrollToLive()
+        expect(!car.isScrolledBack, "back to live follows the output again")
+
+        // The phone turned sideways: far more columns than a car can hold at
+        // this size, so the car shows a window onto the line and follows the
+        // cursor along it.
+        link.setPhoneVisible(true)
+        root.view.frame = CGRect(x: 0, y: 0, width: 852, height: 393)
+        root.view.layoutIfNeeded()
+        emulator.feed(Array("wide ".utf8))
+        let wideGrid = (emulator.cols, emulator.rows)
+        car.tick()
+        expect(emulator.cols > 80, "the phone on its side is a wide grid", "\(emulator.cols) cols")
+        expectEqual(grid.terminalFont.pointSize, CarPlayFraming.fitMinimumPointSize,
+                    "shrunk as far as a car allows, and no further")
+        expect(grid.frame.width > window.frame.width, "and shown through a window onto the line",
+               "grid \(grid.frame.width)pt, window \(window.frame.width)pt")
+        let cursorX = CGFloat(emulator.buffer.cursorX) * grid.cellSize.width + grid.frame.origin.x
+        expect(cursorX >= 0 && cursorX <= window.frame.width,
+               "with the cursor inside it", "cursor at \(cursorX)pt of \(window.frame.width)pt")
+
+        car.beginDrag()
+        car.drag(by: CGPoint(x: grid.cellSize.width * 10, y: 0))
+        car.endDrag()
+        expect(car.isScrolledBack && grid.frame.origin.x == 0,
+               "dragging sideways moves along the line and stays put",
+               "x \(grid.frame.origin.x)")
+        car.scrollToLive()
+
+        // While the phone is in use it keeps its own size, whatever the car
+        // would like: the car picked a size, panned and scrolled, and the
+        // grid never moved.
+        expect(link.carGrid != nil, "the car publishes the grid it can show")
+        expect(emulator.cols == wideGrid.0 && emulator.rows == wideGrid.1,
+               "while the phone is in use the car never resizes its grid",
+               "\(wideGrid) became \((emulator.cols, emulator.rows))")
+        print("  phone grid \(phoneGrid.0)x\(phoneGrid.1) upright, "
+              + "\(wideGrid.0)x\(wideGrid.1) sideways, unchanged by the car")
+
+        // Put away: the car is the only screen anyone is reading, so the shell
+        // takes its size. The phone's own text size is left alone.
+        root.view.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
+        root.view.layoutIfNeeded()
+        let upright = (emulator.cols, emulator.rows)
+        let phoneCell = pane.terminalView.cellSize.width
+        link.setPhoneVisible(false)
+        car.tick()
+        guard let carGrid = link.carGrid else {
+            expect(false, "the car still has a grid")
+            print("")
+            return
+        }
+        expectEqual(emulator.cols, carGrid.cols, "with the phone put away the shell takes the car's columns")
+        expectEqual(emulator.rows, carGrid.rows, "and the car's rows")
+        expect(grid.frame.width <= window.frame.width + 0.5,
+               "so nothing is cut off on the car",
+               "grid \(grid.frame.width)pt in window \(window.frame.width)pt")
+        expect(abs(pane.terminalView.cellSize.width - phoneCell) < 0.01,
+               "and the phone's text size is left as it was", "\(pane.terminalView.cellSize.width)")
+        print("  car leading: shell \(carGrid.cols)x\(carGrid.rows) at \(grid.terminalFont.pointSize)pt")
+
+        // The car's navigation bar hides itself and comes back on a tap, and
+        // the safe area follows it. The shell is sized once for the bar
+        // showing, and after that the bar coming and going only changes how
+        // much history the car shows above it.
+        car.safeAreaOverride = UIEdgeInsets(top: 30, left: 0, bottom: 0, right: 0)
+        car.tick()
+        let withBar = (emulator.cols, emulator.rows)
+        let rowsWithBar = window.frame.height / grid.cellSize.height
+        expect(withBar.1 < carGrid.rows, "a bar that covers more of the car shrinks the shell once",
+               "\(carGrid.rows) rows became \(withBar.1)")
+        car.safeAreaOverride = .zero
+        car.tick()
+        expect(emulator.cols == withBar.0 && emulator.rows == withBar.1,
+               "and the bar hiding again leaves the shell alone",
+               "\(withBar) became \((emulator.cols, emulator.rows))")
+        expect(window.frame.height / grid.cellSize.height > rowsWithBar,
+               "while the car uses the room to show more",
+               "\(rowsWithBar) rows shown, then \(window.frame.height / grid.cellSize.height)")
+        car.safeAreaOverride = UIEdgeInsets(top: 30, left: 0, bottom: 0, right: 0)
+        car.tick()
+        expect(emulator.cols == withBar.0 && emulator.rows == withBar.1,
+               "nor does it coming back", "\(withBar) became \((emulator.cols, emulator.rows))")
+        car.safeAreaOverride = nil
+
+        // Picked up again.
+        link.setPhoneVisible(true)
+        root.view.layoutIfNeeded()
+        expect(emulator.cols == upright.0 && emulator.rows == upright.1,
+               "picking the phone up gives it its own size back",
+               "\(upright) became \((emulator.cols, emulator.rows))")
+
+        // The setting off: the phone's size, even with the phone put away.
+        prefs.carPlayLeads = false
+        link.setPhoneVisible(false)
+        root.view.layoutIfNeeded()
+        expect(emulator.cols == upright.0 && emulator.rows == upright.1,
+               "with the setting off the car never resizes the shell",
+               "\(upright) became \((emulator.cols, emulator.rows))")
+
+        // Unplugging gives the phone its own size back.
+        prefs.carPlayLeads = true
+        expectEqual(emulator.cols, carGrid.cols, "turning it back on hands the car the shell again")
+        link.disconnect()
+        root.view.layoutIfNeeded()
+        expect(emulator.cols == upright.0 && emulator.rows == upright.1,
+               "unplugging gives the phone its size back",
+               "\(upright) became \((emulator.cols, emulator.rows))")
+        link.setPhoneVisible(true)
         print("")
     }
 

@@ -3,8 +3,6 @@ import UIKit
 @main
 final class AppDelegate: UIResponder, UIApplicationDelegate {
 
-    var window: UIWindow?
-
     /// Keeps the process alive for a short while after the user switches away.
     ///
     /// The pty is drained on its own IO queue, not by the display link, so as
@@ -28,19 +26,29 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         // falls back to OSC 52, which is how it works over ssh anyway.
         ClipboardServer.shared.start()
 
-        let window = UIWindow(frame: UIScreen.main.bounds)
-        window.rootViewController = RootViewController()
-        window.makeKeyAndVisible()
-        self.window = window
+        // The windows belong to the scenes (PhoneSceneDelegate and
+        // CarPlaySceneDelegate): CarPlay only exists for apps that use them,
+        // and once an app does, a window made here is never shown.
+        //
+        // With scenes, UIKit stops calling the delegate's background and
+        // foreground methods but still posts these, and posts them for the
+        // app as a whole: going into the background means no scene is left
+        // in front — the phone locked with the car still showing the terminal
+        // is not it, and must not end a session the car is displaying.
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(didEnterBackground),
+                           name: UIApplication.didEnterBackgroundNotification, object: nil)
+        center.addObserver(self, selector: #selector(willEnterForeground),
+                           name: UIApplication.willEnterForegroundNotification, object: nil)
         return true
     }
 
-    func applicationDidEnterBackground(_ application: UIApplication) {
-        beginBackgroundTask(application)
-        (window?.rootViewController as? RootViewController)?.saveSessionState()
+    @objc private func didEnterBackground() {
+        beginBackgroundTask(UIApplication.shared)
+        RootViewController.shared.saveSessionState()
     }
 
-    func applicationWillEnterForeground(_ application: UIApplication) {
+    @objc private func willEnterForeground() {
         endBackgroundTask()
     }
 
@@ -62,7 +70,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     func applicationWillTerminate(_ application: UIApplication) {
         // The shells need nothing here: they are our children, and each one
         // gets its SIGHUP when the process exits and its pty master closes.
-        (window?.rootViewController as? RootViewController)?.saveSessionState()
+        RootViewController.shared.saveSessionState()
         ClipboardServer.shared.stop()
         endBackgroundTask()
     }

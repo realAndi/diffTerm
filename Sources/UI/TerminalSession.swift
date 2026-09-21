@@ -111,6 +111,15 @@ final class TerminalSession: NSObject {
 
     private weak var view: TerminalView?
     private var displayLink: CADisplayLink?
+    /// When `displayLink` last fired. It is paced by the phone's screen, which
+    /// cannot be counted on for frames while the phone is locked; `pumpOutput`
+    /// looks at this to tell whether anyone else needs to drain.
+    private var lastLinkTick: CFTimeInterval = 0
+
+    /// Bumped each time a frame's worth of changes is ready to be shown — the
+    /// moment `view` is told what to repaint. A second screen compares this
+    /// instead of sharing the dirty rows, which the first repaint clears.
+    private(set) var frameGeneration = 0
 
     /// How long one frame may spend emulating. A byte count cannot bound this:
     /// the same half megabyte is milliseconds of plain text and far longer of
@@ -232,6 +241,20 @@ final class TerminalSession: NSObject {
     }
 
     @objc private func tick() {
+        lastLinkTick = CACurrentMediaTime()
+        drainPendingOutput()
+    }
+
+    /// Drains output on behalf of a screen other than the phone's.
+    ///
+    /// With CarPlay attached the app keeps running while the phone is locked,
+    /// and then the only screen still showing this session is in the car. The
+    /// display link above belongs to the phone's screen, and if it stops
+    /// getting frames output piles up unread. The car's own frame callback
+    /// calls this; while the phone's link is running it is a no-op, so the
+    /// two never split one frame's budget.
+    func pumpOutput() {
+        if CACurrentMediaTime() - lastLinkTick < 0.1 { return }
         drainPendingOutput()
     }
 
@@ -331,6 +354,7 @@ final class TerminalSession: NSObject {
         emulator.feed(Diagnostics.terminalReport(
             headline: error.localizedDescription,
             facts: Diagnostics.facts(shell: shell, workingDirectory: workingDirectory)))
+        frameGeneration &+= 1
         view?.setNeedsDisplay()
     }
 
@@ -414,8 +438,6 @@ final class TerminalSession: NSObject {
             delegate?.sessionDidProduceOutput(self)
         }
 
-        guard let view else { return }
-
         // Synchronized output (DECSET 2026): the program is drawing a frame
         // and asked for it to appear all at once. Keep the damage and hold
         // the screen until it says it is done, or the limit runs out.
@@ -426,6 +448,9 @@ final class TerminalSession: NSObject {
             if now - since < synchronizedUpdateLimit { return }
         }
         synchronizedUpdateSince = nil
+        frameGeneration &+= 1
+
+        guard let view else { return }
 
         if emulator.allDirty {
             view.setNeedsDisplay()
@@ -734,6 +759,9 @@ extension TerminalSession: EmulatorDelegate {
 
     func emulatorPaletteDidChange(_ emulator: Emulator) {
         delegate?.sessionPaletteDidChange(self)
+        // The delegate is the pane; the CarPlay screen draws this session too.
+        NotificationCenter.default.post(
+            name: TerminalSession.paletteDidChangeNotification, object: self)
     }
 
     func emulatorShellIntegrationDidChange(_ emulator: Emulator) {
@@ -755,6 +783,15 @@ extension TerminalSession: EmulatorDelegate {
         CommandNotifier.commandFinished(block,
                                         command: command,
                                         title: displayTitle)
+        // The phone's notification only fires with the app in the background,
+        // and a car on its screen keeps the app in front. The car shows its
+        // own alert from this.
+        var info: [String: Any] = ["title": displayTitle]
+        if let command { info["command"] = command }
+        if let code = block.exitCode { info["exitCode"] = code }
+        if let duration = block.duration { info["duration"] = duration }
+        NotificationCenter.default.post(
+            name: TerminalSession.commandDidFinishNotification, object: self, userInfo: info)
     }
 
     /// The command line the user typed, read back off the grid between the
@@ -774,6 +811,13 @@ extension TerminalSession: EmulatorDelegate {
     /// Fired when a command starts or finishes, so the tab chips can show it.
     static let commandStateDidChangeNotification =
         Notification.Name("dev.diffterm.commandStateDidChange")
+    /// Fired once when a command finishes, with `title`, and `command`,
+    /// `exitCode` and `duration` when they are known.
+    static let commandDidFinishNotification =
+        Notification.Name("dev.diffterm.commandDidFinish")
+    /// Fired when a program changes the colours (OSC 4, 10, 11, 12 and resets).
+    static let paletteDidChangeNotification =
+        Notification.Name("dev.diffterm.paletteDidChange")
 }
 
 extension String {

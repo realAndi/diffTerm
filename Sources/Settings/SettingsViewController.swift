@@ -31,7 +31,7 @@ final class SettingsViewController: SettingsTableViewController {
         [appearanceSection(), blocksSection(), predictionSection(),
          fontSection(), cursorSection(), terminalSection(),
          clipboardSection(), keyboardSection(), keyRowSection(),
-         shellSection(), snippetsSection(), aboutSection()]
+         shellSection(), carPlaySection(), snippetsSection(), aboutSection()]
     }
 
     private func appearanceSection() -> SettingsSection {
@@ -337,6 +337,22 @@ final class SettingsViewController: SettingsTableViewController {
                     get: { [unowned self] in self.prefs.keepScreenAwakeWhileRunning },
                     set: { [unowned self] in self.prefs.keepScreenAwakeWhileRunning = $0 }),
         ])
+    }
+
+    private func carPlaySection() -> SettingsSection {
+        SettingsSection(
+            header: "CarPlay",
+            footer: "While you use diffTerm on the phone, the terminal keeps the phone's size and "
+                  + "the car follows the cursor through it. Once the phone is locked or showing "
+                  + "another app, the car is the only screen anyone is reading, so the terminal "
+                  + "is resized to fit it, and full-screen programs fit the car. Turned off, the "
+                  + "terminal always keeps the phone's size.",
+            rows: [
+                .toggle(title: "Fit the Terminal to CarPlay",
+                        subtitle: "When the phone is put away, size the shell for the car's screen.",
+                        get: { [unowned self] in self.prefs.carPlayLeads },
+                        set: { [unowned self] in self.prefs.carPlayLeads = $0 }),
+            ])
     }
 
     private func keyboardSection() -> SettingsSection {

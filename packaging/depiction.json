@@ -55,6 +55,19 @@
         { "class": "DepictionSeparatorView" },
         {
           "class": "DepictionSubheaderView",
+          "title": "On the car's screen",
+          "useBoldText": true,
+          "useBottomMargin": true
+        },
+        {
+          "class": "DepictionMarkdownView",
+          "useSpacing": true,
+          "useRawFormat": false,
+          "markdown": "With CarPlay, the car shows whichever terminal is open on the phone, following the cursor as output arrives. Lock the phone and the terminal is resized to fit the car. Switch tabs, scroll back through history, get an alert when a long command finishes, and press the keys a car will give an app: Ctrl-C, arrows and Return beside the text, with a key pad and — where the car allows one — its keyboard for a whole line."
+        },
+        { "class": "DepictionSeparatorView" },
+        {
+          "class": "DepictionSubheaderView",
           "title": "At a glance",
           "useBoldText": true,
           "useBottomMargin": true
@@ -107,6 +120,18 @@
       "class": "DepictionStackView",
       "tabname": "Changelog",
       "views": [
+        {
+          "class": "DepictionSubheaderView",
+          "title": "2.3",
+          "useBoldText": true,
+          "useBottomMargin": true
+        },
+        {
+          "class": "DepictionMarkdownView",
+          "useSpacing": true,
+          "useRawFormat": false,
+          "markdown": "- CarPlay: see the terminal on the car's screen while you type on the phone.\n- The phone keeps its own size while you use it; locked, the terminal fits the car.\n- A list of tabs in the car, and an alert when a long command finishes.\n- Ctrl-C, arrows and Return beside the text, a key pad for the rest, and the car's keyboard for a whole line where the car allows it."
+        },
         {
           "class": "DepictionSubheaderView",
           "title": "2.2.3",

@@ -32,7 +32,7 @@ enum CommandNotifier {
 
     /// Commands shorter than this are not worth a notification — you were
     /// still looking at the screen when they finished.
-    private static let minimumDuration: TimeInterval = 10
+    static let minimumDuration: TimeInterval = 10
 
     /// Called when a command finishes. Does nothing unless the app is in the
     /// background, the command ran long enough, and the user has not turned
@@ -74,12 +74,7 @@ enum CommandNotifier {
         let failed = (block.exitCode ?? 0) != 0
 
         content.title = failed ? "Command failed" : "Command finished"
-
-        var parts: [String] = []
-        if let command, !command.isEmpty { parts.append(command) }
-        if let code = block.exitCode, code != 0 { parts.append("exit \(code)") }
-        parts.append(format(duration))
-        content.body = parts.joined(separator: " · ")
+        content.body = summary(command: command, exitCode: block.exitCode, duration: duration)
 
         if !title.isEmpty { content.subtitle = title }
         content.sound = .default
@@ -88,6 +83,16 @@ enum CommandNotifier {
         let request = UNNotificationRequest(identifier: UUID().uuidString,
                                             content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
+    }
+
+    /// "make test · exit 2 · 4m 12s". Shared with the car's alert, so both
+    /// screens say the same thing about the same command.
+    static func summary(command: String?, exitCode: Int?, duration: TimeInterval) -> String {
+        var parts: [String] = []
+        if let command, !command.isEmpty { parts.append(command) }
+        if let code = exitCode, code != 0 { parts.append("exit \(code)") }
+        parts.append(format(duration))
+        return parts.joined(separator: " · ")
     }
 
     private static func format(_ seconds: TimeInterval) -> String {

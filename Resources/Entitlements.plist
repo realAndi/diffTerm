@@ -11,5 +11,10 @@
 	<true/>
 	<key>com.apple.private.skip-library-validation</key>
 	<true/>
+	<!-- CarPlay shows an app only for the category it is entitled to, and only
+	     navigation apps may draw their own content, so this is what puts the
+	     terminal on the car's screen. Nothing else about maps is used. -->
+	<key>com.apple.developer.carplay-maps</key>
+	<true/>
 </dict>
 </plist>

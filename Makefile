@@ -19,7 +19,7 @@ SHELL        := $(HOST_JB)/bin/sh
 APP_NAME     ?= diffTerm
 BUNDLE_ID    ?= dev.diffterm.app
 DISPLAY_NAME ?= $(APP_NAME)
-VERSION      ?= 2.2.3
+VERSION      ?= 2.3
 
 # Only the primary install owns the pbcopy/pbpaste links.
 PRIMARY_ID   := dev.diffterm.app
@@ -80,6 +80,8 @@ SPECS        := $(wildcard Resources/Specs/packed/*.z)
 # `if #available` compiles to a real runtime check once the deployment target
 # is older than the version being asked about, and that check lives in clang's
 # builtins archive. Apple's toolchain links it for you; this one does not.
+# CarPlay is linked weak: only the car's scene touches it, and a system
+# without the framework should lose the car screen, not the app.
 CLANG_RT     := $(shell clang -print-resource-dir)/lib/darwin/libclang_rt.ios.a
 
 SWIFT_FLAGS  := -sdk $(SDK) -target $(TARGET) -parse-as-library \
@@ -89,6 +91,7 @@ SWIFT_FLAGS  := -sdk $(SDK) -target $(TARGET) -parse-as-library \
                 -Xcc -isysroot -Xcc $(SDK) \
                 -Xlinker -rpath -Xlinker /usr/lib/swift \
                 -lcompression \
+                -Xlinker -weak_framework -Xlinker CarPlay \
                 -Xlinker $(C_OBJ)
 
 CFLAGS       := -isysroot $(SDK) -target $(TARGET) -O2 -Wall -Wextra

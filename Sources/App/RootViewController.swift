@@ -4,6 +4,13 @@ import UIKit
 /// `SplitContainerController` holding one or more terminals.
 final class RootViewController: UIViewController {
 
+    /// The one set of tabs, shown by the iPhone's window and mirrored on the
+    /// CarPlay screen. Owned here rather than by either scene so that either
+    /// can come and go — CarPlay may start the app with no phone scene at all,
+    /// and the phone's scene can be discarded while the car still shows it —
+    /// without taking the shells with it.
+    static let shared = RootViewController()
+
     private let tabBar = TabBarView()
     private let containerView = UIView()
 
@@ -144,6 +151,74 @@ final class RootViewController: UIViewController {
         tabs.indices.contains(selectedIndex) ? tabs[selectedIndex] : nil
     }
 
+    var tabCount: Int { tabs.count }
+    var selectedTabIndex: Int { selectedIndex }
+
+    func selectNextTab() {
+        guard !tabs.isEmpty else { return }
+        selectTab(at: (selectedIndex + 1) % tabs.count)
+    }
+
+    func selectPreviousTab() {
+        guard !tabs.isEmpty else { return }
+        selectTab(at: (selectedIndex - 1 + tabs.count) % tabs.count)
+    }
+
+    /// Brings the tabs up when there is no phone window to put them in.
+    ///
+    /// CarPlay can launch the app straight onto the car's screen. Nothing
+    /// appears on the phone then, and appearing is what gives the tabs a size
+    /// and starts their shells. So they are laid out as the phone's screen
+    /// would lay them out; when the phone's scene arrives it takes the view
+    /// over and resizes everything to what it really has.
+    ///
+    /// Starting the shells is `startSessionsIfNeeded`, a step apart: forking
+    /// is the riskiest thing this does, and the car's screen is better off
+    /// showing the restored text a moment early than not at all.
+    func prepareWithoutWindowIfNeeded() {
+        loadViewIfNeeded()
+        guard view.window == nil else { return }
+        view.frame = UIScreen.main.bounds
+        view.layoutIfNeeded()
+    }
+
+    /// Starts any shell that has not run yet — what appearing does on the
+    /// phone. Panes that are already running are left alone.
+    func startSessionsIfNeeded() {
+        for tab in tabs {
+            for pane in tab.panes { pane.startSessionIfNeeded() }
+        }
+    }
+
+    /// Every pane in every tab. The car keeps their output moving while the
+    /// phone is locked and not drawing any of them.
+    var allPanes: [TerminalPaneController] { tabs.flatMap { $0.panes } }
+
+    /// Each tab's active pane and how many panes it has, in tab order, for
+    /// the car's list of tabs.
+    var tabSummaries: [(pane: TerminalPaneController, paneCount: Int)] {
+        tabs.map { ($0.activePane, $0.panes.count) }
+    }
+
+    /// Brings forward the tab a session belongs to, for the car's "Show" on
+    /// an alert about it. Does nothing if that tab has since been closed.
+    func selectTab(containing session: TerminalSession) {
+        guard let index = tabs.firstIndex(where: { tab in
+            tab.panes.contains { $0.session === session }
+        }) else { return }
+        if index != selectedIndex { selectTab(at: index) }
+    }
+
+    /// A new tab, opened from the car. The phone may have no window to
+    /// appear in, and appearing is what normally sizes a pane and starts its
+    /// shell, so both are done here.
+    func openTabFromCar() {
+        prepareWithoutWindowIfNeeded()
+        let tab = addTab(activate: true, inheriting: directoryForNewTab())
+        view.layoutIfNeeded()
+        tab.activePane.startSessionIfNeeded()
+    }
+
     /// Puts back whatever was on screen when the app was last backgrounded.
     /// Falls back to a single empty tab, which is also what happens the first
     /// time and whenever the feature is switched off.
@@ -163,6 +238,9 @@ final class RootViewController: UIViewController {
     /// background — the last moment we are reliably given — and again on
     /// termination, which iOS often skips.
     func saveSessionState() {
+        // No scene has shown the tabs yet, so there are none — and saving
+        // that would throw away the ones the last launch left behind.
+        guard isViewLoaded else { return }
         guard Preferences.shared.restoreSessions else {
             SessionStore.clear()
             return
@@ -491,13 +569,11 @@ extension RootViewController: SplitContainerDelegate {
     }
 
     func splitContainerDidRequestNextTab(_ container: SplitContainerController) {
-        guard !tabs.isEmpty else { return }
-        selectTab(at: (selectedIndex + 1) % tabs.count)
+        selectNextTab()
     }
 
     func splitContainerDidRequestPreviousTab(_ container: SplitContainerController) {
-        guard !tabs.isEmpty else { return }
-        selectTab(at: (selectedIndex - 1 + tabs.count) % tabs.count)
+        selectPreviousTab()
     }
 
     func splitContainer(_ container: SplitContainerController, didRequestTabAtIndex index: Int) {

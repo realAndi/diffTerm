@@ -162,6 +162,16 @@ final class TerminalPaneController: UIViewController {
         NotificationCenter.default.addObserver(
             self, selector: #selector(preferencesChanged),
             name: Preferences.didChangeNotification, object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(carPlayLinkChanged),
+            name: CarPlayLink.didChangeNotification, object: nil)
+    }
+
+    /// The shell's size may now be the car's, or may be ours again: see
+    /// CarPlayLink. The font is left alone either way — the phone is not
+    /// being looked at while the car leads.
+    @objc private func carPlayLinkChanged() {
+        recomputeTerminalSize()
     }
 
     override func viewDidLayoutSubviews() {
@@ -187,15 +197,26 @@ final class TerminalPaneController: UIViewController {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        if session.exitCode == nil && !session.isRunning { session.start() }
+        startSessionIfNeeded()
         becomeFirstResponderIfPossible()
+    }
+
+    /// Starts the shell unless it has already run. Appearing is what usually
+    /// does this; CarPlay can bring the app up with nothing on the phone to
+    /// appear, and calls it directly.
+    func startSessionIfNeeded() {
+        if session.exitCode == nil && !session.isRunning { session.start() }
     }
 
     override var canBecomeFirstResponder: Bool { true }
 
     @discardableResult
     func becomeFirstResponderIfPossible() -> Bool {
-        hostView.becomeFirstResponder()
+        // The keyboard is raised for the key window's first responder, and
+        // with CarPlay attached the car's window can be holding that. Take it
+        // back first, or the caret lands here and no keyboard comes up.
+        if let window = view.window, !window.isKeyWindow { window.makeKey() }
+        return hostView.becomeFirstResponder()
     }
 
     // MARK: - Appearance
@@ -267,8 +288,14 @@ final class TerminalPaneController: UIViewController {
     // MARK: - Geometry
 
     private func recomputeTerminalSize() {
-        let cols = terminalView.visibleCols
-        let rows = terminalView.visibleRows
+        var cols = terminalView.visibleCols
+        var rows = terminalView.visibleRows
+        // While the phone is put away and a car is showing this, the shell is
+        // the size of the car's screen. See CarPlayLink.
+        if let grid = CarPlayLink.shared.grid {
+            cols = grid.cols
+            rows = grid.rows
+        }
         guard cols > 0, rows > 0 else { return }
         session.resize(cols: cols, rows: rows,
                        pixelWidth: CGFloat(cols) * terminalView.cellSize.width,

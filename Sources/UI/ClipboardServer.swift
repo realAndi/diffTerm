@@ -253,7 +253,13 @@ final class ClipboardServer {
     }
 
     private static func topViewController() -> UIViewController? {
-        var top = UIApplication.shared.windows.first(where: { $0.isKeyWindow })?.rootViewController
+        // The phone's window, never the car's: CarPlay's window can be the key
+        // one, and a prompt there could not be answered from the phone.
+        let phone = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .filter { $0.session.role == .windowApplication }
+            .flatMap { $0.windows }
+        var top = (phone.first(where: { $0.isKeyWindow }) ?? phone.first)?.rootViewController
         while let presented = top?.presentedViewController { top = presented }
         return top
     }

@@ -22,6 +22,10 @@ The emulator is written from scratch against the DEC VT500 state diagram rather 
 
 The iPad layout is implemented but has not yet been run on real hardware. (I don't own real hardware.)
 
+With CarPlay, the car's screen shows whichever terminal is open on the phone and follows the cursor as output arrives or as you type. While you use the phone, the terminal keeps the phone's size and the car shrinks its text to show the phone's lines whole; lock the phone and the terminal is resized for the car instead. Tabs switch from either screen, a list in the car shows what each one is doing, and a long command finishing in any tab puts an alert on the car's screen.
+
+A CarPlay app cannot be touched where it draws — the car routes touches to its own interface — so the keyboard is the buttons CarPlay draws for it: Ctrl-C, up, down and Return beside the text, a key pad for esc, tab, arrows and Ctrl-D, and the car's own keyboard for a whole line, which many cars withhold while moving. Real typing stays on the phone. diffTerm registers as a navigation app, because that is the only kind CarPlay lets draw its own screen. It has been run in the iOS Simulator's CarPlay screen, not yet in a real car.
+
 ## Installing
 
 diffTerm is published in my package repository. Add the source in Sileo or Zebra and then search for diffTerm.

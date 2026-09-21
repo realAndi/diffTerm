@@ -471,6 +471,20 @@ final class Preferences {
         }
     }
 
+    /// While a car is connected and the phone is locked or showing another
+    /// app, size the shell for the car's screen. The phone always has its own
+    /// size while it shows diffTerm. Off, the shell stays the phone's size
+    /// and the car shows the part of it the cursor is in. See CarPlayLink.
+    @Stored("carPlayLeads", true) private var carPlayLeadsStored: Bool
+    var carPlayLeads: Bool {
+        get { carPlayLeadsStored }
+        set {
+            guard newValue != carPlayLeadsStored else { return }
+            carPlayLeadsStored = newValue
+            changed()
+        }
+    }
+
     @Stored("keyboardHaptics", true) private var keyboardHapticsStored: Bool
     var keyboardHaptics: Bool {
         get { keyboardHapticsStored }

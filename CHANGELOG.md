@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.3
+
+### New
+- **CarPlay.** The car's screen shows whichever terminal is open on the phone and follows the cursor: as output arrives, or as you type on the phone, the newest rows and the cursor's part of the line stay in view. diffTerm registers as a navigation app, the only kind CarPlay lets draw its own screen.
+- **The screen you are looking at sets the size.** While diffTerm is on the phone, the terminal keeps the phone's size and text, and the car draws the phone's lines small enough to show them whole — down to 7 points; only a phone on its side is wider than that, and then the car follows the cursor along the line. Lock the phone or switch to another app and the car is the only screen anyone is reading, so the terminal is resized to fit it and full-screen programs fit the car; pick the phone up and it gets its own size back. Settings › CarPlay turns the second half off.
+- **Keys in the car.** An app can only be pressed through the buttons CarPlay draws for it, so those are the keyboard: Ctrl-C, up, down and Return sit in a column beside the text, and Keys holds esc, tab, left, right, Ctrl-C and Ctrl-D. "Type" opens the car's own keyboard for a whole line and offers this session's history under it; many cars refuse a keyboard while moving, and then that button hides itself. Everything else stays on the phone, which is still the real keyboard.
+- **Tabs in the car.** Tabs lists every tab with what it is doing — the command running, the one that failed and its status, or the directory it is sitting in — and opens new ones. Switching on either screen switches both.
+- **Alerts in the car.** When a command that ran for ten seconds or more finishes, in any tab, the car says so, with how it ended and how long it took, and Show takes you to it. Programs that post a notification (OSC 9 and 777) show up the same way. With a car on its screen the app never goes to the background, so the phone's own notification would never have fired.
+- Dragging the car's screen scrolls back through history, and sideways along lines too long for the car; cars driven by a knob or touchpad scroll from Keys › scroll. Live appears in the car's bar once you have moved off the newest output, like a maps app's recentre button. The title line says which columns are shown and how far back from the live text you are.
+
+### Changed
+- The app now uses scenes, which CarPlay requires. Tabs belong to the app rather than to the phone's window, so the car can start diffTerm before the phone has, and the shells keep running when the phone's window is discarded.
+- Screens are saved when the app as a whole goes to the background. With the car still showing the terminal, locking the phone no longer counts.
+
 ## 2.2
 
 ### New
